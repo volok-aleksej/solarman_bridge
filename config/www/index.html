@@ -109,7 +109,7 @@
     </div>
 
     <details class="rt-details">
-      <summary>Details</summary>
+      <summary>Grid details</summary>
       <div class="info-grid">
         <template x-for="row in detailRows()" :key="row[0]">
           <div class="info-row">
@@ -122,17 +122,15 @@
     <div class="phase-wrap">
       <table class="phase-table">
         <thead>
-          <tr><th>Phase</th><th>Grid V</th><th>Grid W</th><th>Inverter W</th><th>Load V</th><th>Load W</th></tr>
+          <tr><th>Phase</th><th>Voltage, V</th><th>Current, A</th><th>Power, W</th></tr>
         </thead>
         <tbody>
           <template x-for="p in [1,2,3]" :key="p">
             <tr>
               <td x-text="'L'+p"></td>
               <td x-text="(s['grid_l'+p+'_voltage_mv']/1000).toFixed(1)"></td>
+              <td x-text="(s['grid_l'+p+'_current_ma']/1000).toFixed(2)"></td>
               <td x-text="s['grid_l'+p+'_power_w']"></td>
-              <td x-text="s['inv_l'+p+'_power_w']"></td>
-              <td x-text="(s['load_l'+p+'_voltage_mv']/1000).toFixed(1)"></td>
-              <td x-text="s['load_l'+p+'_power_w']"></td>
             </tr>
           </template>
         </tbody>

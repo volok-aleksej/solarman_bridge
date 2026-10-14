@@ -172,13 +172,6 @@ function inverter() {
     watts(w)  { return w == null ? '—' : Math.round(w) + ' W'; },
     amps(ma)  { return ma == null ? '—' : (ma / 1000).toFixed(1) + ' A'; },
     kwh(wh)   { return wh == null ? '—' : (wh / 1000).toFixed(1) + ' kWh'; },
-    degC(dc)  { return (dc / 10).toFixed(1) + ' °C'; },
-    pvText(n) {
-      const s = this.s;
-      return s['pv' + n + '_power_w'] + ' W · ' +
-             (s['pv' + n + '_voltage_mv'] / 1000).toFixed(1) + ' V · ' +
-             (s['pv' + n + '_current_ma'] / 1000).toFixed(1) + ' A';
-    },
     ageText() {
       const a = this.live.age_ms;
       if (a == null || a < 0) return '?';
@@ -225,22 +218,10 @@ function inverter() {
 
     detailRows() {
       const s = this.s;
-      const v = mv => (mv / 1000).toFixed(1) + ' V';
-      const rows = [
-        ['PV1', this.pvText(1)],
-        ['PV2', this.pvText(2)],
-        ['Battery', v(s.batt_voltage_mv) + ' · ' + this.amps(s.batt_current_ma) +
-                    ' · ' + this.degC(s.batt_temp_dc)],
-        ['Grid frequency', (s.grid_freq_chz / 100).toFixed(2) + ' Hz'],
-        ['Inverter output', this.watts(s.inv_power_w)],
-        ['Inverter DC / AC temp', this.degC(s.dc_temp_dc) + ' / ' + this.degC(s.ac_temp_dc)],
-        ['Total PV', this.kwh(s.total_pv_wh)],
-        ['Total load', this.kwh(s.total_load_wh)],
+      return [
+        ['Frequency',           (s.grid_freq_chz / 100).toFixed(2) + ' Hz'],
         ['Total bought / sold', this.kwh(s.total_grid_buy_wh) + ' / ' + this.kwh(s.total_grid_sell_wh)],
-        ['Total charged / discharged', this.kwh(s.total_batt_charge_wh) + ' / ' +
-                                       this.kwh(s.total_batt_discharge_wh)],
       ];
-      return rows;
     },
 
     _startLivePolling() {
