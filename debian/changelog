@@ -1,0 +1,8 @@
+solarman-bridge (0.1.0) stable; urgency=medium
+
+  * Initial release: native Solarman V5 / Modbus RTU client,
+    Deye SG04LP3 register map, SQLite history with decimated range queries
+    and daily energy from the inverter's own counters, HTTP dashboard
+    (Realtime / History / Energy / Info) and JSON API on port 8081.
+
+ -- Alexey Volokitin <elenaluk89@gmail.com>  Wed, 14 Oct 2026 17:00:00 +0300

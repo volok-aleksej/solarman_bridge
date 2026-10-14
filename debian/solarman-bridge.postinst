@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+CONFIG_DIR=/etc/solarman_bridge
+CONFIG_FILE=$CONFIG_DIR/solarman_bridge.conf
+TEMPLATE_FILE=/usr/share/solarman_bridge/solarman_bridge.conf.template
+
+case "$1" in
+    configure)
+        # Drop a working config in place only if the operator has not
+        # already got one; an existing file is never touched.
+        if [ ! -e "$CONFIG_FILE" ] && [ -e "$TEMPLATE_FILE" ]; then
+            mkdir -p "$CONFIG_DIR"
+            cp "$TEMPLATE_FILE" "$CONFIG_FILE"
+            chmod 0644 "$CONFIG_FILE"
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

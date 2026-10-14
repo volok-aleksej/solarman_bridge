@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Solarman Bridge</title>
+<!-- Every URL is relative: the page also works behind a reverse proxy that
+     mounts this service under a path prefix. -->
+<link rel="stylesheet" href="style.css">
+<script defer src="chart.umd.min.js"></script>
+<script defer src="alpine.min.js"></script>
+</head>
+<body x-data="inverter()" x-init="init()">
+
+<header>
+  <span class="logo">&#9728; Solarman Bridge</span>
+  <nav class="tabs">
+    <button :class="{active: tab==='realtime'}" @click="openTab('realtime')">Realtime</button>
+    <button :class="{active: tab==='history'}"  @click="openTab('history')">History</button>
+    <button :class="{active: tab==='energy'}"   @click="openTab('energy')">Energy</button>
+    <button :class="{active: tab==='info'}"     @click="openTab('info')">Info</button>
+  </nav>
+  <span class="hdr-status" x-text="status"></span>
+</header>
+
+<!-- ═══════════════════════ REALTIME ═══════════════════════ -->
+<div x-show="tab==='realtime'">
+
+  <div class="offline-banner" x-show="live.sample && !live.online">
+    No fresh data from the inverter — showing the last sample
+    (<span x-text="ageText()"></span> old).
+  </div>
+
+  <template x-if="s">
+  <div>
+    <div class="flow-row">
+      <div class="flow-card">
+        <div class="flow-title">Solar PV</div>
+        <div class="flow-power pos" x-text="kw(s.pv1_power_w + s.pv2_power_w)"></div>
+        <div class="flow-line"><span>PV1</span><span x-text="pvText(1)"></span></div>
+        <div class="flow-line"><span>PV2</span><span x-text="pvText(2)"></span></div>
+        <div class="flow-line"><span>Today</span><span x-text="kwh(s.day_pv_wh)"></span></div>
+      </div>
+
+      <div class="flow-card">
+        <div class="flow-title">Battery</div>
+        <div class="flow-power" :class="s.batt_power_w < 0 ? 'pos' : s.batt_power_w > 0 ? 'neg' : ''">
+          <span x-text="kw(Math.abs(s.batt_power_w))"></span>
+          <span class="flow-dir" x-text="s.batt_power_w < 0 ? 'charging' : s.batt_power_w > 0 ? 'discharging' : 'idle'"></span>
+        </div>
+        <div class="soc-bar-outer"><div class="soc-bar-inner" :style="`width:${s.batt_soc_pct}%`"></div></div>
+        <div class="flow-line"><span>SoC</span><span x-text="s.batt_soc_pct + ' %'"></span></div>
+        <div class="flow-line"><span>Voltage / current</span>
+          <span x-text="(s.batt_voltage_mv/1000).toFixed(2)+' V / '+(s.batt_current_ma/1000).toFixed(2)+' A'"></span></div>
+        <div class="flow-line"><span>Temperature</span><span x-text="degC(s.batt_temp_dc)"></span></div>
+        <div class="flow-line"><span>Today chg / dis</span>
+          <span x-text="kwh(s.day_batt_charge_wh)+' / '+kwh(s.day_batt_discharge_wh)"></span></div>
+      </div>
+
+      <div class="flow-card">
+        <div class="flow-title">Grid</div>
+        <div class="flow-power" :class="s.grid_power_w > 0 ? 'neg' : s.grid_power_w < 0 ? 'pos' : ''">
+          <span x-text="kw(Math.abs(s.grid_power_w))"></span>
+          <span class="flow-dir" x-text="s.grid_power_w > 0 ? 'import' : s.grid_power_w < 0 ? 'export' : ''"></span>
+        </div>
+        <div class="flow-line"><span>Frequency</span><span x-text="(s.grid_freq_chz/100).toFixed(2)+' Hz'"></span></div>
+        <div class="flow-line"><span>Today buy / sell</span>
+          <span x-text="kwh(s.day_grid_buy_wh)+' / '+kwh(s.day_grid_sell_wh)"></span></div>
+        <div class="flow-line"><span>Total buy / sell</span>
+          <span x-text="kwh(s.total_grid_buy_wh)+' / '+kwh(s.total_grid_sell_wh)"></span></div>
+      </div>
+
+      <div class="flow-card">
+        <div class="flow-title">Load</div>
+        <div class="flow-power" x-text="kw(s.load_power_w)"></div>
+        <div class="flow-line"><span>Inverter output</span><span x-text="kw(s.inv_power_w)"></span></div>
+        <div class="flow-line"><span>Today</span><span x-text="kwh(s.day_load_wh)"></span></div>
+        <div class="flow-line"><span>Total</span><span x-text="kwh(s.total_load_wh)"></span></div>
+      </div>
+    </div>
+
+    <div class="phase-wrap">
+      <table class="phase-table">
+        <thead>
+          <tr><th>Phase</th><th>Grid V</th><th>Grid W</th><th>Inverter W</th><th>Load V</th><th>Load W</th></tr>
+        </thead>
+        <tbody>
+          <template x-for="p in [1,2,3]" :key="p">
+            <tr>
+              <td x-text="'L'+p"></td>
+              <td x-text="(s['grid_l'+p+'_voltage_mv']/1000).toFixed(1)"></td>
+              <td x-text="s['grid_l'+p+'_power_w']"></td>
+              <td x-text="s['inv_l'+p+'_power_w']"></td>
+              <td x-text="(s['load_l'+p+'_voltage_mv']/1000).toFixed(1)"></td>
+              <td x-text="s['load_l'+p+'_power_w']"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="status-strip">
+      <span class="flag" :class="live.run_state_name==='normal' ? 'on' : 'err'"
+            x-text="'State: '+live.run_state_name"></span>
+      <span class="flag" :class="s.fault_bits ? 'err' : 'off'"
+            x-text="'Faults: '+(s.fault_bits ? '0x'+s.fault_bits.toString(16).toUpperCase() : '0')"></span>
+      <span class="flag" :class="s.warning_bits ? 'err' : 'off'"
+            x-text="'Warnings: '+(s.warning_bits ? '0x'+s.warning_bits.toString(16).toUpperCase() : '0')"></span>
+      <span class="sep"></span>
+      <span class="muted" x-text="'DC: '+degC(s.dc_temp_dc)"></span>
+      <span class="muted" x-text="'AC: '+degC(s.ac_temp_dc)"></span>
+      <span class="sep"></span>
+      <span class="muted" x-text="live.inverter_time ? 'Inverter clock: '+live.inverter_time : ''"></span>
+    </div>
+  </div>
+  </template>
+
+  <div class="info-empty" x-show="!s">No data received yet</div>
+</div>
+
+<!-- ═══════════════════════ HISTORY ════════════════════════ -->
+<div x-show="tab==='history'">
+  <div class="history-toolbar">
+    <template x-for="h in [1,6,12,24,168]" :key="h">
+      <button :class="{on: histHours===h}" @click="histHours=h; loadHistory()"
+              x-text="h===168 ? '7d' : h+'h'"></button>
+    </template>
+    <span class="hdr-status" x-text="histStatus"></span>
+  </div>
+  <div class="charts">
+    <div class="chart-box"><canvas id="cp"></canvas></div>
+    <div class="chart-box sm"><canvas id="cs"></canvas></div>
+    <div class="chart-box sm"><canvas id="cb"></canvas></div>
+    <div class="chart-box"><canvas id="cg"></canvas></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ ENERGY ═════════════════════════ -->
+<div x-show="tab==='energy'">
+  <div class="energy-toolbar">
+    <button @click="shiftEnergyMonth(-1)">&larr;</button>
+    <span class="energy-month-label" x-text="energyMonthLabel()"></span>
+    <button @click="shiftEnergyMonth(1)" :disabled="!canNextEnergyMonth()">&rarr;</button>
+    <span class="hdr-status" x-text="energyStatus"></span>
+  </div>
+  <div class="energy-totals" x-show="energyTotals" x-text="energyTotals"></div>
+  <div class="charts">
+    <div class="chart-box" style="height:320px"><canvas id="ce"></canvas></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ INFO ═══════════════════════════ -->
+<div x-show="tab==='info'">
+  <div class="info-grid">
+    <template x-for="row in infoRows()" :key="row[0]">
+      <div class="info-row">
+        <span class="ir-label" x-text="row[0]"></span>
+        <span class="ir-value" x-text="row[1]"></span>
+      </div>
+    </template>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

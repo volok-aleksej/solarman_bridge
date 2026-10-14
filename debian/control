@@ -1,0 +1,27 @@
+Source: solarman-bridge
+Section: utils
+Priority: optional
+Maintainer: Alexey Volokitin <elenaluk89@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               cmake,
+               pkgconf,
+               libconfuse-dev,
+               libspdlog-dev,
+               libsqlite3-dev,
+               libevent-dev (>= 2.1),
+               libcjson-dev,
+               libgtest-dev
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: solarman-bridge
+Architecture: amd64
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         sqlite3
+Description: Deye hybrid inverter monitor over a Solarman WiFi logger
+ solarman_bridge polls a Deye three-phase hybrid inverter through its
+ Solarman / IGEN WiFi data logger (Solarman V5 protocol, TCP port 8899),
+ keeps a history of PV, battery, grid and load telemetry plus the inverter's
+ daily energy counters in SQLite, and serves a web dashboard with realtime
+ values, history charts and monthly energy statistics.

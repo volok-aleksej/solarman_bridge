@@ -1,0 +1,3 @@
+usr/bin/solarman_bridge
+usr/share/solarman_bridge/solarman_bridge.conf.template
+usr/share/solarman_bridge/www/*

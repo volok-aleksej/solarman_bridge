@@ -1,0 +1,22 @@
+[Unit]
+Description=Deye inverter monitor over a Solarman WiFi logger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=SOLARMAN_BRIDGE_CONFIG=/etc/solarman_bridge/solarman_bridge.conf
+ExecStart=/usr/bin/solarman_bridge
+Restart=on-failure
+RestartSec=5
+# Needs nothing but the network, its config and its own state directory.
+DynamicUser=yes
+StateDirectory=solarman_bridge
+StateDirectoryMode=0750
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

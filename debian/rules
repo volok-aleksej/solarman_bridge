@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --buildsystem=cmake
+
+# Stage to debian/tmp/ so dh_install takes exactly the files listed in
+# debian/solarman-bridge.install.
+override_dh_auto_install:
+	dh_auto_install --destdir=debian/tmp
+
+override_dh_auto_test:
+	cd obj-* && ctest --output-on-failure
