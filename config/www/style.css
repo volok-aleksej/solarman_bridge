@@ -361,7 +361,7 @@ canvas { display: block; width: 100%; }
   white-space: nowrap;
 }
 .phase-table th { color: #57606a; font-size: 12px; background: #f6f8fa; }
-.phase-table th:first-child, .phase-table td:first-child { text-align: left; }
+.phase-table th:first-of-type, .phase-table td:first-of-type { text-align: left; }
 
 .offline-banner {
   margin: 12px 16px 0;
@@ -411,10 +411,19 @@ canvas { display: block; width: 100%; }
 .fn-value.neg     { fill: #cf222e; }
 .fn-sub           { font-size: 12px; fill: #57606a; }
 
-.rt-details { margin: 0 0 24px; }
-.rt-details summary {
-  cursor: pointer;
-  padding: 8px 16px;
-  font-size: 12px;
-  color: #57606a;
+.rt-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 16px;
 }
+.rt-tabs button {
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  color: #1f2328;
+  padding: 3px 11px;
+  cursor: pointer;
+  border-radius: 4px;
+  font: inherit;
+}
+.rt-tabs button:hover { background: #eaeef2; }
+.rt-tabs button.on    { background: #dbeafe; border-color: #0969da; color: #0969da; font-weight: bold; }

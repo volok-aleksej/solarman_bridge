@@ -13,6 +13,14 @@ const API = {
 const LIVE_POLL_MS = 1000;
 // Below this a flow line is drawn idle: sensors read a few watts at rest.
 const FLOW_MIN_W   = 20;
+
+// Tabs under the Realtime diagram, one table set per node.
+const RT_TABS = [
+  { id: 'batt', label: 'Battery' },
+  { id: 'pv',   label: 'Solar' },
+  { id: 'grid', label: 'Grid' },
+  { id: 'load', label: 'Load' },
+];
 const TABS = ['realtime', 'history', 'energy', 'info'];
 
 // ── Chart.js helpers ──────────────────────────────────────────────────────────
@@ -131,6 +139,8 @@ function inverter() {
     energyMonth:  new Date().getMonth() + 1,
     energyStatus: '',
     energyTotals: '',
+    rtTab:        'batt',
+    RT_TABS,
     cmdBusy:      false,
     cmdStatus:    '',
 
@@ -203,6 +213,57 @@ function inverter() {
                   grid: s.grid_power_w,
                   load: -s.load_power_w }[node];
       return Math.abs(w) < FLOW_MIN_W ? '' : w > 0 ? 'in' : 'out';
+    },
+
+    // Tables of the selected Realtime tab: [{head: [...], rows: [[...]]}].
+    rtTables() {
+      const s = this.s;
+      const V  = mv => (mv / 1000).toFixed(1);
+      const A  = ma => (ma / 1000).toFixed(2);
+      const kWh = wh => (wh / 1000).toFixed(1);
+      const C  = dc => (dc / 10).toFixed(1);
+      const phases = [1, 2, 3];
+      switch (this.rtTab) {
+        case 'batt': return [
+          { head: ['Voltage, V', 'Current, A', 'Power, W', 'SoC, %', 'Temperature, °C'],
+            rows: [[(s.batt_voltage_mv / 1000).toFixed(2), A(s.batt_current_ma),
+                    s.batt_power_w, s.batt_soc_pct, C(s.batt_temp_dc)]] },
+          { head: ['Energy, kWh', 'Charged', 'Discharged'],
+            rows: [['Today', kWh(s.day_batt_charge_wh),   kWh(s.day_batt_discharge_wh)],
+                   ['Total', kWh(s.total_batt_charge_wh), kWh(s.total_batt_discharge_wh)]] },
+        ];
+        case 'pv': return [
+          { head: ['String', 'Voltage, V', 'Current, A', 'Power, W'],
+            rows: [1, 2].map(n => ['PV' + n, V(s['pv' + n + '_voltage_mv']),
+                                   A(s['pv' + n + '_current_ma']), s['pv' + n + '_power_w']]) },
+          { head: ['Energy, kWh', 'Generated'],
+            rows: [['Today', kWh(s.day_pv_wh)], ['Total', kWh(s.total_pv_wh)]] },
+        ];
+        case 'grid': return [
+          // The inverter reports one grid frequency for all phases.
+          { head: ['Phase', 'Voltage, V', 'Current, A', 'Power, W', 'Frequency, Hz'],
+            rows: phases.map(p => ['L' + p, V(s['grid_l' + p + '_voltage_mv']),
+                                   A(s['grid_l' + p + '_current_ma']), s['grid_l' + p + '_power_w'],
+                                   (s.grid_freq_chz / 100).toFixed(2)]) },
+          { head: ['Energy, kWh', 'Bought', 'Sold'],
+            rows: [['Today', kWh(s.day_grid_buy_wh),   kWh(s.day_grid_sell_wh)],
+                   ['Total', kWh(s.total_grid_buy_wh), kWh(s.total_grid_sell_wh)]] },
+        ];
+        case 'load': return [
+          // No load current register: P / U per phase.
+          { head: ['Phase', 'Voltage, V', 'Current ≈, A', 'Power, W', 'Inverter output, W'],
+            rows: phases.map(p => {
+              const mv = s['load_l' + p + '_voltage_mv'], w = s['load_l' + p + '_power_w'];
+              return ['L' + p, V(mv), mv > 0 ? A(Math.abs(w) / mv * 1e6) : '—', w,
+                      s['inv_l' + p + '_power_w']];
+            }) },
+          { head: ['Energy, kWh', 'Consumed'],
+            rows: [['Today', kWh(s.day_load_wh)], ['Total', kWh(s.total_load_wh)]] },
+          { head: ['Inverter', 'DC side, °C', 'AC side, °C'],
+            rows: [['Temperature', C(s.dc_temp_dc), C(s.ac_temp_dc)]] },
+        ];
+      }
+      return [];
     },
 
     canControl() {

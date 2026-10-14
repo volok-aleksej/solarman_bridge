@@ -108,29 +108,25 @@
       <span class="muted" x-text="cmdStatus"></span>
     </div>
 
-    <details class="rt-details">
-      <summary>Grid details</summary>
-    <div class="phase-wrap">
-      <table class="phase-table">
-        <thead>
-          <tr><th>Phase</th><th>Voltage, V</th><th>Current, A</th><th>Power, W</th><th>Frequency, Hz</th></tr>
-        </thead>
-        <tbody>
-          <template x-for="p in [1,2,3]" :key="p">
-            <tr>
-              <td x-text="'L'+p"></td>
-              <td x-text="(s['grid_l'+p+'_voltage_mv']/1000).toFixed(1)"></td>
-              <td x-text="(s['grid_l'+p+'_current_ma']/1000).toFixed(2)"></td>
-              <td x-text="s['grid_l'+p+'_power_w']"></td>
-              <!-- The inverter reports one grid frequency for all phases. -->
-              <td x-text="(s.grid_freq_chz/100).toFixed(2)"></td>
-            </tr>
-          </template>
-        </tbody>
-      </table>
+    <div class="rt-tabs">
+      <template x-for="t in RT_TABS" :key="t.id">
+        <button :class="{on: rtTab===t.id}" @click="rtTab=t.id" x-text="t.label"></button>
+      </template>
     </div>
-
-    </details>
+    <template x-for="(tbl, ti) in rtTables()" :key="rtTab + ti">
+      <div class="phase-wrap">
+        <table class="phase-table">
+          <thead>
+            <tr><template x-for="h in tbl.head" :key="h"><th x-text="h"></th></template></tr>
+          </thead>
+          <tbody>
+            <template x-for="row in tbl.rows" :key="row[0]">
+              <tr><template x-for="(c, ci) in row" :key="ci"><td x-text="c"></td></template></tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </template>
   </div>
   </template>
 
