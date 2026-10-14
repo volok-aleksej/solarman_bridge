@@ -10,7 +10,7 @@ const API = {
   command: 'api/command',
 };
 
-const LIVE_POLL_MS = 2000;
+const LIVE_POLL_MS = 1000;
 // Below this a flow line is drawn idle: sensors read a few watts at rest.
 const FLOW_MIN_W   = 20;
 const TABS = ['realtime', 'history', 'energy', 'info'];
@@ -124,6 +124,7 @@ function inverter() {
     live:         {},
     info:         null,
     status:       'connecting…',
+    linkStatus:   'connecting…',
     histHours:    24,
     histStatus:   '',
     energyYear:   new Date().getFullYear(),
@@ -218,20 +219,31 @@ function inverter() {
 
 
     _startLivePolling() {
+      let busy = false;
       const poll = async () => {
+        if (busy) return;   // a slow answer must not stack requests up
+        busy = true;
         try {
           const r = await fetch(API.live);
           if (!r.ok) throw new Error(r.status);
           this.live = await r.json();
-          this.status = this.live.online
-            ? new Date().toLocaleTimeString()
+          this.linkStatus = this.live.online ? ''
             : (this.live.connected ? 'stale data' : 'logger offline');
         } catch (e) {
-          this.status = 'error: ' + e.message;
+          this.linkStatus = 'error: ' + e.message;
         }
+        busy = false;
       };
       poll();
       setInterval(poll, LIVE_POLL_MS);
+
+      // The header clock ticks on its own, on the second boundary, so it
+      // never skips or repeats a second because of request timing.
+      const tick = () => {
+        this.status = this.linkStatus || new Date().toLocaleTimeString();
+        setTimeout(tick, 1000 - Date.now() % 1000 + 5);
+      };
+      tick();
     },
 
     // ── history ──────────────────────────────────────────────────────────────
