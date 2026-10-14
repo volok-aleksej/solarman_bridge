@@ -26,7 +26,7 @@ struct InverterSnapshot {
     PollStats stats;
 };
 
-// Written by the poller thread, read by the HTTP thread.
+// Written by the poller on the dispatcher thread, read by the HTTP thread.
 class InverterState {
 public:
     void set_connected(bool v) {

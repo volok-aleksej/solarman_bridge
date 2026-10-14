@@ -75,15 +75,15 @@ int main(int argc, char** argv) {
 
     history.purge();
 
-    Poller     poller(cfg.logger, state, history);
+    // The poller runs on the dispatcher thread, so History is written only
+    // from here; the HTTP thread reads it through its own connection.
+    Poller     poller(dispatcher, cfg.logger, state, history);
     HttpServer http_server(history, state, cfg.logger, cfg.http);
-    poller.start();
     http_server.start();
 
     dispatcher.run();
 
     spdlog::info("solarman_bridge stopping");
     http_server.stop();
-    poller.stop();
     return EXIT_SUCCESS;
 }

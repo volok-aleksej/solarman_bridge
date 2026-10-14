@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <signal.h>
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <system_error>
@@ -52,17 +53,31 @@ Dispatcher::~Dispatcher() {
 }
 
 void Dispatcher::watch(int fd, Handler on_readable) {
-    handlers_.emplace(fd, std::move(on_readable));
+    watch(fd, EPOLLIN, [h = std::move(on_readable)](uint32_t) { h(); });
+}
+
+void Dispatcher::watch(int fd, uint32_t events, IoHandler on_event) {
+    handlers_.emplace(fd, std::move(on_event));
     epoll_event ev{};
-    ev.events  = EPOLLIN;
+    ev.events  = events;
     ev.data.fd = fd;
     if (epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev) < 0) {
         throw std::system_error(errno, std::generic_category(), "epoll_ctl ADD");
     }
 }
 
+void Dispatcher::modify(int fd, uint32_t events) {
+    epoll_event ev{};
+    ev.events  = events;
+    ev.data.fd = fd;
+    if (epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev) < 0) {
+        throw std::system_error(errno, std::generic_category(), "epoll_ctl MOD");
+    }
+}
+
 void Dispatcher::unwatch(int fd) {
-    handlers_.erase(fd);
+    if (handlers_.erase(fd) == 0) return;
+    unwatched_.push_back(fd);
     if (epfd_ >= 0) {
         epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
     }
@@ -96,6 +111,7 @@ void Dispatcher::run() {
             if (errno == EINTR) continue;
             throw std::system_error(errno, std::generic_category(), "epoll_wait");
         }
+        unwatched_.clear();
         for (int i = 0; i < n; ++i) {
             int fd = events[i].data.fd;
             if (fd == signalfd_) {
@@ -110,9 +126,13 @@ void Dispatcher::run() {
                 wake_event_.consume();
                 continue;
             }
+            if (std::find(unwatched_.begin(), unwatched_.end(), fd) != unwatched_.end())
+                continue;
             auto it = handlers_.find(fd);
             if (it != handlers_.end()) {
-                it->second();
+                // A copy: the handler may unwatch its own fd.
+                IoHandler h = it->second;
+                h(events[i].events);
             }
         }
     }

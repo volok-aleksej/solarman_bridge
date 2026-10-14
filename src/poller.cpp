@@ -1,18 +1,17 @@
 #include "poller.hpp"
 
-#include "deye_registers.hpp"
+#include "dispatcher.hpp"
 #include "history.hpp"
 #include "inverter_state.hpp"
+#include "modbus_rtu.hpp"
 
 #include <spdlog/spdlog.h>
 
-#include <poll.h>
-
+#include <algorithm>
 #include <ctime>
+#include <iterator>
 
 namespace {
-
-using Clock = std::chrono::steady_clock;
 
 constexpr auto kPurgeInterval = std::chrono::hours(1);
 
@@ -26,29 +25,99 @@ std::string local_date() {
     return buf;
 }
 
-}  // namespace
-
-Poller::Poller(const LoggerConfig& cfg, InverterState& state, History& history)
-    : cfg_(cfg), state_(state), history_(history),
-      client_(cfg.host, cfg.port, cfg.serial, cfg.slave_id,
-              std::chrono::milliseconds(cfg.timeout_ms), stop_event_.fd()) {}
-
-void Poller::sleep_until(Clock::time_point deadline) {
-    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          deadline - Clock::now()).count();
-    if (left <= 0) return;
-    pollfd pfd{stop_event_.fd(), POLLIN, 0};
-    ::poll(&pfd, 1, left);
+std::string block_name(const RegisterBlock& b) {
+    return "regs " + std::to_string(b.addr) + "+" + std::to_string(b.count);
 }
 
-bool Poller::poll_identity(std::string& error) {
+}  // namespace
+
+Poller::Poller(Dispatcher& dispatcher, const LoggerConfig& cfg,
+               InverterState& state, History& history)
+    : dispatcher_(dispatcher), cfg_(cfg), state_(state), history_(history),
+      client_(dispatcher, cfg.host, cfg.port, cfg.serial,
+              std::chrono::milliseconds(cfg.timeout_ms)) {
+    spdlog::info("poller: logger {}:{} serial {} slave {}, every {} ms",
+                 cfg_.host, cfg_.port, cfg_.serial, cfg_.slave_id,
+                 cfg_.poll_period_ms);
+
+    dispatcher_.watch(cycle_timer_.fd(), [this] {
+        cycle_timer_.consume();
+        start_cycle();
+    });
+    dispatcher_.watch(purge_timer_.fd(), [this] {
+        purge_timer_.consume();
+        history_.purge();
+    });
+    purge_timer_.arm_periodic(kPurgeInterval);
+    cycle_timer_.arm(std::chrono::milliseconds(0));
+}
+
+Poller::~Poller() {
+    dispatcher_.unwatch(cycle_timer_.fd());
+    dispatcher_.unwatch(purge_timer_.fd());
+    client_.close();
+}
+
+void Poller::start_cycle() {
+    cycle_start_ = Clock::now();
+    blocks_.clear();
+    if (!identity_known_) blocks_.push_back(kIdentityBlock);
+    blocks_.push_back(kClockBlock);
+    blocks_.insert(blocks_.end(), std::begin(kLiveBlocks), std::end(kLiveBlocks));
+    next_block_ = 0;
+    bank_ = RegisterBank{};
+
+    if (client_.connected()) read_next();
+    else client_.connect([this](bool ok, const std::string& e) { on_connected(ok, e); });
+}
+
+void Poller::on_connected(bool ok, const std::string& error) {
+    if (!ok) {
+        end_cycle(false, error);
+        return;
+    }
+    identity_known_ = false;
+    state_.set_connected(true);
+    if (blocks_.front().addr != kIdentityBlock.addr)
+        blocks_.insert(blocks_.begin(), kIdentityBlock);
+    read_next();
+}
+
+void Poller::read_next() {
+    const RegisterBlock& b = blocks_[next_block_];
+    client_.request(modbus::build_read_holding(cfg_.slave_id, b.addr, b.count),
+                    [this](bool ok, std::vector<uint8_t> mb, const std::string& e) {
+                        on_reply(ok, std::move(mb), e);
+                    });
+}
+
+void Poller::on_reply(bool ok, std::vector<uint8_t> modbus,
+                      const std::string& error) {
+    const RegisterBlock b = blocks_[next_block_];
+    if (!ok) {
+        end_cycle(false, block_name(b) + ": " + error);
+        return;
+    }
     std::vector<uint16_t> regs;
-    if (!client_.read_holding(kIdentityBlock.addr, kIdentityBlock.count,
-                              regs, error))
-        return false;
-    RegisterBank bank;
-    bank.put(kIdentityBlock.addr, regs);
-    InverterIdentity id = decode_identity(bank);
+    std::string perr;
+    if (!modbus::parse_read_holding(modbus, cfg_.slave_id, b.count, regs, perr)) {
+        // The TCP stream is still in sync; only this answer was bad.
+        end_cycle(false, block_name(b) + ": " + perr);
+        return;
+    }
+    bank_.put(b.addr, regs);
+    if (b.addr == kIdentityBlock.addr) publish_identity();
+
+    if (++next_block_ < blocks_.size()) {
+        read_next();
+        return;
+    }
+    publish_sample();
+    end_cycle(true, {});
+}
+
+void Poller::publish_identity() {
+    InverterIdentity id = decode_identity(bank_);
     spdlog::info("poller: inverter serial {} device type {}",
                  id.serial, id.device_type);
     if (id.device_type != 5)
@@ -56,29 +125,14 @@ bool Poller::poll_identity(std::string& error) {
                      "map was written for; values may be wrong", id.device_type);
     state_.set_identity(std::move(id));
     identity_known_ = true;
-    return true;
 }
 
-bool Poller::poll_cycle(std::string& error) {
-    const auto t0 = Clock::now();
-    RegisterBank bank;
-    std::vector<uint16_t> regs;
-
-    if (!client_.read_holding(kClockBlock.addr, kClockBlock.count, regs, error))
-        return false;
-    bank.put(kClockBlock.addr, regs);
-
-    for (const auto& blk : kLiveBlocks) {
-        if (!client_.read_holding(blk.addr, blk.count, regs, error))
-            return false;
-        bank.put(blk.addr, regs);
-    }
-
-    InverterSample sample = decode_sample(bank);
-    std::optional<InverterClock> clock = decode_clock(bank);
+void Poller::publish_sample() {
+    InverterSample sample = decode_sample(bank_);
+    std::optional<InverterClock> clock = decode_clock(bank_);
     const std::string day = clock ? clock->date() : local_date();
     const int64_t cycle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 Clock::now() - t0).count();
+                                 Clock::now() - cycle_start_).count();
 
     spdlog::debug("poller: pv={}W batt={}W soc={}% grid={}W load={}W ({} ms)",
                   sample.pv_power_w[0] + sample.pv_power_w[1],
@@ -88,55 +142,26 @@ bool Poller::poll_cycle(std::string& error) {
 
     history_.append(sample, day);
     state_.apply_cycle(std::move(sample), clock, cycle_ms);
-    return true;
 }
 
-void Poller::run() {
-    spdlog::info("poller: logger {}:{} serial {} slave {}, every {} ms",
-                 cfg_.host, cfg_.port, cfg_.serial, cfg_.slave_id,
-                 cfg_.poll_period_ms);
-
-    const auto period    = std::chrono::milliseconds(cfg_.poll_period_ms);
-    const auto reconnect = std::chrono::milliseconds(cfg_.reconnect_ms);
-    auto next_purge = Clock::now() + kPurgeInterval;
-    // Log the first failure of a streak loudly, the repeats quietly, so an
-    // inverter that is off for the night does not flood the log.
-    bool failing = false;
-
-    while (!stopping()) {
-        const auto cycle_start = Clock::now();
-        std::string error;
-
-        bool ok = client_.connected() || client_.connect(error);
-        if (ok && !state_.snapshot().connected) state_.set_connected(true);
-        if (ok && !identity_known_) ok = poll_identity(error);
-        if (ok) ok = poll_cycle(error);
-
-        if (stopping()) break;
-
-        if (ok) {
-            if (failing) spdlog::info("poller: inverter answering again");
-            failing = false;
-        } else {
-            if (failing) spdlog::debug("poller: {}", error);
-            else         spdlog::warn("poller: {}", error);
-            failing = true;
-            state_.record_failure(error);
-            if (!client_.connected()) {
-                state_.set_connected(false);
-                identity_known_ = false;
-            }
-        }
-
-        if (Clock::now() >= next_purge) {
-            history_.purge();
-            next_purge = Clock::now() + kPurgeInterval;
-        }
-
-        // A lost connection waits reconnect_ms; anything else keeps the
-        // regular cadence measured from the start of the cycle.
-        sleep_until(cycle_start + (client_.connected() ? period : reconnect));
+void Poller::end_cycle(bool ok, const std::string& error) {
+    if (ok) {
+        if (failing_) spdlog::info("poller: inverter answering again");
+        failing_ = false;
+    } else {
+        if (failing_) spdlog::debug("poller: {}", error);
+        else          spdlog::warn("poller: {}", error);
+        failing_ = true;
+        state_.record_failure(error);
+        if (!client_.connected() && state_.snapshot().connected)
+            state_.set_connected(false);
     }
-    client_.close();
-    spdlog::info("poller: stopped");
+
+    // A lost connection waits reconnect_ms; anything else keeps the regular
+    // cadence measured from the start of the cycle.
+    const auto delay = std::chrono::milliseconds(
+        client_.connected() ? cfg_.poll_period_ms : cfg_.reconnect_ms);
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+        cycle_start_ + delay - Clock::now());
+    cycle_timer_.arm(std::max(left, std::chrono::milliseconds(0)));
 }
