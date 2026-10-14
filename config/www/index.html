@@ -110,19 +110,10 @@
 
     <details class="rt-details">
       <summary>Grid details</summary>
-      <div class="info-grid">
-        <template x-for="row in detailRows()" :key="row[0]">
-          <div class="info-row">
-            <span class="ir-label" x-text="row[0]"></span>
-            <span class="ir-value" x-text="row[1]"></span>
-          </div>
-        </template>
-      </div>
-
     <div class="phase-wrap">
       <table class="phase-table">
         <thead>
-          <tr><th>Phase</th><th>Voltage, V</th><th>Current, A</th><th>Power, W</th></tr>
+          <tr><th>Phase</th><th>Voltage, V</th><th>Current, A</th><th>Power, W</th><th>Frequency, Hz</th></tr>
         </thead>
         <tbody>
           <template x-for="p in [1,2,3]" :key="p">
@@ -131,6 +122,8 @@
               <td x-text="(s['grid_l'+p+'_voltage_mv']/1000).toFixed(1)"></td>
               <td x-text="(s['grid_l'+p+'_current_ma']/1000).toFixed(2)"></td>
               <td x-text="s['grid_l'+p+'_power_w']"></td>
+              <!-- The inverter reports one grid frequency for all phases. -->
+              <td x-text="(s.grid_freq_chz/100).toFixed(2)"></td>
             </tr>
           </template>
         </tbody>

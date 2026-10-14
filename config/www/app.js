@@ -216,13 +216,6 @@ function inverter() {
       if (c) this.runCommand(c);
     },
 
-    detailRows() {
-      const s = this.s;
-      return [
-        ['Frequency',           (s.grid_freq_chz / 100).toFixed(2) + ' Hz'],
-        ['Total bought / sold', this.kwh(s.total_grid_buy_wh) + ' / ' + this.kwh(s.total_grid_sell_wh)],
-      ];
-    },
 
     _startLivePolling() {
       const poll = async () => {
