@@ -159,6 +159,14 @@
       </div>
     </template>
   </div>
+
+  <div class="control-block" x-show="info && info.control.enabled">
+    <span class="ir-label">Inverter control</span>
+    <template x-for="c in (info ? info.control.commands : [])" :key="c.name">
+      <button :disabled="cmdBusy" @click="runCommand(c)" x-text="cmdLabel(c.name)"></button>
+    </template>
+    <span class="hdr-status" x-text="cmdStatus"></span>
+  </div>
 </div>
 
 <script src="app.js"></script>

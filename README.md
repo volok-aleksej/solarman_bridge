@@ -26,10 +26,19 @@ number), not the inverter's.
 | `api/info` | logger and inverter identity, poll statistics, last error |
 | `api/history?time_start=&time_end=&count=` | samples oldest first (unix seconds; decimated to `count` buckets, max 2000) |
 | `api/daily?year=&month=` | daily energy rows for one month |
+| `POST api/command` | runs a named command, body `{"name": "power_on"}` or `"power_off"` |
 
 Sample fields are integers whose names carry the unit: `_w`, `_mv`, `_ma`,
 `_wh`, `_dc` (0.1 °C), `_chz` (0.01 Hz). Battery power is positive when
 discharging; grid power is positive when importing.
+
+Commands are off unless `control { enabled = true }` is set. There is no
+raw register write: each command owns some bits of one register, which is
+read, changed, written with Modbus function 0x10 and read back. The power
+switch is register 80 bit 0. Off stops inverting and charging; the display
+stays alive. Every write is logged. The endpoint takes only a JSON body, so
+a foreign web page cannot trigger it without a CORS preflight, but it has no
+authentication of its own.
 
 The pages use only relative URLs, so a reverse proxy can mount the service
 under a path prefix (for example `/inverter/`).

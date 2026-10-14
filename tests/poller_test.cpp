@@ -1,5 +1,6 @@
 #include "dispatcher.hpp"
 #include "history.hpp"
+#include "inverter_commands.hpp"
 #include "inverter_state.hpp"
 #include "modbus_rtu.hpp"
 #include "poller.hpp"
@@ -240,8 +241,9 @@ TEST(Poller, RunsFullCyclesAndStoresSamples) {
         });
         d.run();
 
-        const auto rows = history.range(std::chrono::system_clock::now() - std::chrono::minutes(1),
-                                        std::chrono::system_clock::now(), 0);
+        const auto now  = std::chrono::system_clock::now();
+        const auto rows = history.range(now - std::chrono::minutes(1),
+                                        now + std::chrono::minutes(1), 0);
         EXPECT_GE(rows.size(), 3u);
         const auto days = history.daily(2026, 10);
         ASSERT_EQ(days.size(), 1u);
@@ -259,4 +261,127 @@ TEST(Poller, RunsFullCyclesAndStoresSamples) {
     // Identity once, then clock + 3 live blocks per cycle, on one connection.
     EXPECT_EQ(logger.accepted(), 1);
     EXPECT_GE(requests, 1 + 3 * 4);
+}
+
+namespace {
+
+// A fake inverter behind the fake logger: zeroed registers except the
+// identity, the clock and register 80, which also takes 0x10 writes.
+struct FakeInverter {
+    uint16_t reg80 = 1;
+    bool     reject_writes = false;
+    int      writes = 0;
+    int      reads  = 0;
+
+    void serve(int fd, const std::vector<uint8_t>& req) {
+        const uint8_t  func = req[27];
+        const uint16_t addr = (req[28] << 8) | req[29];
+        const uint16_t qty  = (req[30] << 8) | req[31];
+        std::vector<uint8_t> mb;
+        if (func == modbus::kWriteMultipleRegisters) {
+            ++writes;
+            if (reject_writes) {
+                mb = {1, 0x90, 0x02};
+            } else {
+                reg80 = (req[33] << 8) | req[34];
+                mb = {1, 0x10, req[28], req[29], req[30], req[31]};
+            }
+            const uint16_t crc = modbus::crc16(mb.data(), mb.size());
+            mb.push_back(crc & 0xFF);
+            mb.push_back(crc >> 8);
+        } else {
+            ++reads;
+            std::vector<uint16_t> regs(qty, 0);
+            if (addr == 0)  regs[0] = 5;
+            if (addr == 62) regs = {0x1a0a, 0x0e10, 0x2715};
+            if (addr == 80) regs[0] = reg80;
+            mb = modbus_regs(regs);
+        }
+        send_bytes(fd, v5_response(v5::kControlResponse, req[5], mb));
+    }
+};
+
+class PollerCommandTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        db_ = "/tmp/solarman_cmd_test_" + std::to_string(getpid()) + ".sqlite3";
+    }
+    void TearDown() override {
+        for (const char* sfx : {"", "-wal", "-shm"}) std::remove((db_ + sfx).c_str());
+    }
+
+    // Runs the poller and submits `cmd` once the first cycle is done.
+    CommandResult run(FakeInverter& inv, const char* cmd) {
+        Dispatcher d;
+        FakeLogger logger(d, [&](int fd, const std::vector<uint8_t>& req) {
+            inv.serve(fd, req);
+        });
+        InverterState state;
+        History history(db_, 30);
+        LoggerConfig cfg;
+        cfg.host = "127.0.0.1";
+        cfg.port = logger.port();
+        cfg.serial = kSerial;
+        cfg.poll_period_ms = 1000;
+        Poller poller(d, cfg, state, history);
+
+        CommandResult result;
+        bool submitted = false;
+        d.add_timer(10, [&] {
+            if (submitted || state.snapshot().stats.cycles_ok < 1) return;
+            submitted = true;
+            EXPECT_TRUE(poller.submit(*find_command(cmd), [&](const CommandResult& r) {
+                result = r;
+                d.stop();
+            }));
+        });
+        d.run();
+        return result;
+    }
+
+    std::string db_;
+};
+
+}  // namespace
+
+TEST_F(PollerCommandTest, PowerOffWritesAndVerifies) {
+    FakeInverter inv;
+    const CommandResult r = run(inv, "power_off");
+    EXPECT_TRUE(r.ok) << r.error;
+    EXPECT_EQ(r.before, 1);
+    EXPECT_EQ(r.after, 0);
+    EXPECT_EQ(inv.reg80, 0);
+    EXPECT_EQ(inv.writes, 1);
+}
+
+TEST_F(PollerCommandTest, NoWriteWhenAlreadyInState) {
+    FakeInverter inv;
+    const CommandResult r = run(inv, "power_on");
+    EXPECT_TRUE(r.ok) << r.error;
+    EXPECT_EQ(r.before, 1);
+    EXPECT_EQ(r.after, 1);
+    EXPECT_EQ(inv.writes, 0);
+}
+
+TEST_F(PollerCommandTest, ReportsModbusException) {
+    FakeInverter inv;
+    inv.reject_writes = true;
+    const CommandResult r = run(inv, "power_off");
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("illegal data address"), std::string::npos) << r.error;
+    EXPECT_EQ(inv.reg80, 1);
+}
+
+TEST_F(PollerCommandTest, KeepsOtherBitsOfTheRegister) {
+    FakeInverter inv;
+    inv.reg80 = 0x0102;
+    const CommandResult r = run(inv, "power_on");
+    EXPECT_TRUE(r.ok) << r.error;
+    EXPECT_EQ(inv.reg80, 0x0103);
+}
+
+TEST(InverterCommands, Whitelist) {
+    ASSERT_NE(find_command("power_on"), nullptr);
+    EXPECT_EQ(find_command("power_on")->reg, 80);
+    EXPECT_EQ(find_command("reboot"), nullptr);
 }

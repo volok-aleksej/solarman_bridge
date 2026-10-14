@@ -37,6 +37,9 @@ public:
         return state_ == State::Idle || state_ == State::Awaiting;
     }
     bool idle() const noexcept { return state_ == State::Idle; }
+    bool busy() const noexcept {
+        return state_ == State::Connecting || state_ == State::Awaiting;
+    }
 
     // Requires the client to be closed. The host is resolved with
     // getaddrinfo, which blocks only when it is a name, not an address.

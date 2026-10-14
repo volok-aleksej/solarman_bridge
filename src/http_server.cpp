@@ -1,7 +1,9 @@
 #include "http_server.hpp"
 
 #include "history.hpp"
+#include "inverter_commands.hpp"
 #include "inverter_state.hpp"
+#include "poller.hpp"
 #include "sample_columns.hpp"
 
 #include <event2/buffer.h>
@@ -19,6 +21,7 @@
 #include <ctime>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <stdexcept>
 
 namespace {
@@ -80,6 +83,15 @@ struct Query {
     }
 };
 
+constexpr size_t kMaxBodySize = 1024;
+
+struct PendingCommand {
+    evhttp_request*        req = nullptr;
+    const InverterCommand* cmd = nullptr;
+    event*                 ev = nullptr;
+    CommandResult          result;
+};
+
 const char* mime_for_ext(const std::string& path) {
     auto dot = path.rfind('.');
     if (dot == std::string::npos) return "application/octet-stream";
@@ -98,8 +110,10 @@ const char* mime_for_ext(const std::string& path) {
 }  // namespace
 
 HttpServer::HttpServer(const History& history, const InverterState& state,
-                       const LoggerConfig& logger_cfg, const HttpConfig& http_cfg)
-    : history_(history), state_(state), logger_cfg_(logger_cfg),
+                       Poller& poller, const LoggerConfig& logger_cfg,
+                       const HttpConfig& http_cfg, const ControlConfig& control_cfg)
+    : history_(history), state_(state), poller_(poller),
+      control_enabled_(control_cfg.enabled), logger_cfg_(logger_cfg),
       port_(http_cfg.http_port), www_root_(http_cfg.www_root) {
     evthread_use_pthreads();
     base_ = event_base_new();
@@ -107,7 +121,9 @@ HttpServer::HttpServer(const History& history, const InverterState& state,
 
     http_ = evhttp_new(base_);
     if (!http_) throw std::runtime_error("http: evhttp_new failed");
-    evhttp_set_allowed_methods(http_, EVHTTP_REQ_GET | EVHTTP_REQ_HEAD);
+    evhttp_set_allowed_methods(http_, EVHTTP_REQ_GET | EVHTTP_REQ_HEAD |
+                                      EVHTTP_REQ_POST);
+    evhttp_set_max_body_size(http_, kMaxBodySize);
     evhttp_set_gencb(http_, on_request, this);
 
     if (evhttp_bind_socket(http_, "0.0.0.0", port_) != 0)
@@ -137,7 +153,14 @@ void HttpServer::on_request(evhttp_request* req, void* arg) {
     std::string path = p && p[0] ? p : "/";
     if (path == "/") path = "/index.html";
 
-    if      (path == "/api/live")    self->handle_live(req);
+    const bool post = evhttp_request_get_command(req) == EVHTTP_REQ_POST;
+    if (post != (path == "/api/command")) {
+        send_json(req, HTTP_BADMETHOD, "{\"error\":\"method not allowed\"}");
+        return;
+    }
+
+    if      (path == "/api/command") self->handle_command(req);
+    else if (path == "/api/live")    self->handle_live(req);
     else if (path == "/api/info")    self->handle_info(req);
     else if (path == "/api/history") self->handle_history(req);
     else if (path == "/api/daily")   self->handle_daily(req);
@@ -235,6 +258,16 @@ void HttpServer::handle_info(evhttp_request* req) {
         cJSON_AddNumberToObject(inv, "device_type", snap.identity->device_type);
     }
 
+    cJSON* ctl = cJSON_AddObjectToObject(root.p, "control");
+    cJSON_AddBoolToObject(ctl, "enabled", control_enabled_);
+    cJSON* cmds = cJSON_AddArrayToObject(ctl, "commands");
+    for (const auto& c : kInverterCommands) {
+        cJSON* o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name",        c.name);
+        cJSON_AddStringToObject(o, "description", c.description);
+        cJSON_AddItemToArray(cmds, o);
+    }
+
     cJSON* st = cJSON_AddObjectToObject(root.p, "stats");
     cJSON_AddNumberToObject(st, "cycles_ok",     snap.stats.cycles_ok);
     cJSON_AddNumberToObject(st, "cycles_failed", snap.stats.cycles_failed);
@@ -299,4 +332,71 @@ void HttpServer::handle_daily(evhttp_request* req) {
         cJSON_AddItemToArray(arr, o);
     }
     send_json(req, HTTP_OK, cjson_print(root.p));
+}
+
+void HttpServer::handle_command(evhttp_request* req) {
+    if (!control_enabled_) {
+        send_json(req, 403,
+                  "{\"error\":\"control is disabled in the config\"}");
+        return;
+    }
+    // A JSON body is not a "simple" cross-origin request, so a foreign page
+    // cannot fire a command without a CORS preflight, which is not served.
+    const char* ctype = evhttp_find_header(evhttp_request_get_input_headers(req),
+                                           "Content-Type");
+    if (!ctype || std::string(ctype).compare(0, 16, "application/json") != 0) {
+        send_json(req, 415, "{\"error\":\"expected application/json\"}");
+        return;
+    }
+
+    evbuffer* in = evhttp_request_get_input_buffer(req);
+    std::string body(evbuffer_get_length(in), '\0');
+    evbuffer_copyout(in, body.data(), body.size());
+    CJsonPtr json(cJSON_Parse(body.c_str()));
+    const cJSON* name = cJSON_GetObjectItemCaseSensitive(json.p, "name");
+    const InverterCommand* cmd =
+        cJSON_IsString(name) ? find_command(name->valuestring) : nullptr;
+    if (!cmd) {
+        send_json(req, HTTP_BADREQUEST, "{\"error\":\"unknown command\"}");
+        return;
+    }
+
+    char* peer = nullptr;
+    uint16_t peer_port = 0;
+    evhttp_connection_get_peer(evhttp_request_get_connection(req), &peer, &peer_port);
+    spdlog::info("http: command {} from {}", cmd->name, peer ? peer : "?");
+
+    auto* p = new PendingCommand;
+    p->req = req;
+    p->cmd = cmd;
+    p->ev = event_new(base_, -1, 0, &HttpServer::on_command_done, p);
+    // The callback runs on the dispatcher thread; event_active() hands the
+    // result over to this one.
+    const bool queued = poller_.submit(*cmd, [p](const CommandResult& r) {
+        p->result = r;
+        event_active(p->ev, 0, 0);
+    });
+    if (!queued) {
+        event_free(p->ev);
+        delete p;
+        send_json(req, HTTP_SERVUNAVAIL, "{\"error\":\"command queue is full\"}");
+    }
+}
+
+void HttpServer::on_command_done(int, short, void* arg) {
+    std::unique_ptr<PendingCommand> p(static_cast<PendingCommand*>(arg));
+    event_free(p->ev);
+
+    CJsonPtr root(cJSON_CreateObject());
+    cJSON_AddStringToObject(root.p, "command", p->cmd->name);
+    cJSON_AddBoolToObject  (root.p, "ok",      p->result.ok);
+    if (p->result.ok) {
+        cJSON_AddNumberToObject(root.p, "before", p->result.before);
+        cJSON_AddNumberToObject(root.p, "after",  p->result.after);
+    } else {
+        cJSON_AddStringToObject(root.p, "error", p->result.error.c_str());
+    }
+    // A client that went away meanwhile is fine: libevent then just frees
+    // the request.
+    send_json(p->req, p->result.ok ? HTTP_OK : 502, cjson_print(root.p));
 }

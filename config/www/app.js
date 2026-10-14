@@ -7,6 +7,7 @@ const API = {
   info:    'api/info',
   history: 'api/history',
   daily:   'api/daily',
+  command: 'api/command',
 };
 
 const LIVE_POLL_MS = 2000;
@@ -127,6 +128,8 @@ function inverter() {
     energyMonth:  new Date().getMonth() + 1,
     energyStatus: '',
     energyTotals: '',
+    cmdBusy:      false,
+    cmdStatus:    '',
 
     get s() { return this.live.sample || null; },
 
@@ -359,6 +362,31 @@ function inverter() {
         const r = await fetch(API.info);
         if (r.ok) this.info = await r.json();
       } catch (_) {}
+    },
+
+    // Labels of the commands the control block offers, by API name.
+    cmdLabel(name) {
+      return { power_on: 'Turn on', power_off: 'Turn off' }[name] || name;
+    },
+
+    async runCommand(c) {
+      if (!confirm(`${this.cmdLabel(c.name)}: ${c.description}?`)) return;
+      this.cmdBusy   = true;
+      this.cmdStatus = 'sending…';
+      try {
+        const r = await fetch(API.command, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ name: c.name }),
+        });
+        const j = await r.json();
+        this.cmdStatus = j.ok
+          ? `done (register ${j.before} → ${j.after})`
+          : 'failed: ' + j.error;
+      } catch (e) {
+        this.cmdStatus = 'failed: ' + e.message;
+      }
+      this.cmdBusy = false;
     },
 
     infoRows() {

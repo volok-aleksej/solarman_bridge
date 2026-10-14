@@ -64,8 +64,9 @@ int main(int argc, char** argv) {
 
     init_logger(cfg.log_level, cfg.log_file);
 
-    spdlog::info("solarman_bridge starting; logger {}:{} serial {}",
-                 cfg.logger.host, cfg.logger.port, cfg.logger.serial);
+    spdlog::info("solarman_bridge starting; logger {}:{} serial {}, control {}",
+                 cfg.logger.host, cfg.logger.port, cfg.logger.serial,
+                 cfg.control.enabled ? "enabled" : "disabled");
 
     // Dispatcher first: it blocks SIGINT/SIGTERM for the whole process
     // before any worker thread is spawned, so only its signalfd sees them.
@@ -78,7 +79,8 @@ int main(int argc, char** argv) {
     // The poller runs on the dispatcher thread, so History is written only
     // from here; the HTTP thread reads it through its own connection.
     Poller     poller(dispatcher, cfg.logger, state, history);
-    HttpServer http_server(history, state, cfg.logger, cfg.http);
+    HttpServer http_server(history, state, poller, cfg.logger, cfg.http,
+                           cfg.control);
     http_server.start();
 
     dispatcher.run();

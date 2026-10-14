@@ -23,6 +23,11 @@ struct HistoryConfig {
     int retention_days = 30;
 };
 
+struct ControlConfig {
+    // Lets POST api/command write to the inverter. Off unless set.
+    bool enabled = false;
+};
+
 struct AppConfig {
     int log_level = 4;
     std::string log_file;
@@ -30,6 +35,7 @@ struct AppConfig {
     LoggerConfig  logger;
     HttpConfig    http;
     HistoryConfig history;
+    ControlConfig control;
 };
 
 bool load_config(const std::string& path, AppConfig& out, std::string& error);

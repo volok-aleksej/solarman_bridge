@@ -154,3 +154,33 @@ TEST(SolarmanV5, FrameLengthSplitsStream) {
     EXPECT_EQ(v5::frame_length(partial, junk), 0u);
     EXPECT_EQ(junk, 0u);
 }
+
+TEST(ModbusRtu, BuildWriteMultiple) {
+    // Reference CRC computed independently.
+    EXPECT_EQ(modbus::build_write_multiple(1, 80, {0}),
+              (std::vector<uint8_t>{0x01, 0x10, 0x00, 0x50, 0x00, 0x01, 0x02,
+                                    0x00, 0x00, 0xaa, 0x00}));
+}
+
+TEST(ModbusRtu, ParseWriteMultipleEcho) {
+    const std::vector<uint8_t> echo = {0x01, 0x10, 0x00, 0x50, 0x00, 0x01, 0x01, 0xd8};
+    std::string err;
+    EXPECT_TRUE(modbus::parse_write_multiple(echo, 1, 80, 1, err)) << err;
+    EXPECT_FALSE(modbus::parse_write_multiple(echo, 1, 81, 1, err));
+    EXPECT_NE(err.find("echo mismatch"), std::string::npos);
+
+    auto quirk = echo;
+    quirk.push_back(0);
+    quirk.push_back(0);
+    EXPECT_TRUE(modbus::parse_write_multiple(quirk, 1, 80, 1, err)) << err;
+}
+
+TEST(ModbusRtu, ParseWriteMultipleException) {
+    std::vector<uint8_t> f = {0x01, 0x90, 0x02};
+    const uint16_t crc = modbus::crc16(f.data(), f.size());
+    f.push_back(crc & 0xFF);
+    f.push_back(crc >> 8);
+    std::string err;
+    EXPECT_FALSE(modbus::parse_write_multiple(f, 1, 80, 1, err));
+    EXPECT_NE(err.find("illegal data address"), std::string::npos);
+}

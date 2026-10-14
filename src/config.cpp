@@ -42,6 +42,11 @@ cfg_opt_t history_opts[] = {
     CFG_END()
 };
 
+cfg_opt_t control_opts[] = {
+    CFG_BOOL("enabled", cfg_false, CFGF_NONE),
+    CFG_END()
+};
+
 std::string sstr(cfg_t* s, const char* name) {
     const char* v = cfg_getstr(s, name);
     return v ? std::string(v) : std::string();
@@ -56,6 +61,7 @@ bool load_config(const std::string& path, AppConfig& out, std::string& error) {
         CFG_SEC("logger",  logger_opts,  CFGF_NONE),
         CFG_SEC("http",    http_opts,    CFGF_NONE),
         CFG_SEC("history", history_opts, CFGF_NONE),
+        CFG_SEC("control", control_opts, CFGF_NONE),
         CFG_END()
     };
 
@@ -111,6 +117,9 @@ bool load_config(const std::string& path, AppConfig& out, std::string& error) {
         out.history.db_path        = sstr(s, "db_path");
         out.history.retention_days = cfg_getint(s, "retention_days");
     }
+
+    if (cfg_t* s = cfg_getsec(cfg, "control"))
+        out.control.enabled = cfg_getbool(s, "enabled");
 
     cfg_free(cfg);
     return true;
