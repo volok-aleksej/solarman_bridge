@@ -162,11 +162,14 @@
   <div class="energy-pies">
     <template x-for="pie in energyPies" :key="pie.id">
       <div class="pie-card">
-        <div class="pie-title">
-          <span x-text="pie.title"></span>
-          <b x-text="pie.total.toFixed(1) + ' kWh'"></b>
+        <div class="pie-title" x-text="pie.title"></div>
+        <div class="pie-box">
+          <canvas :id="'pie-' + pie.id"></canvas>
+          <div class="pie-center">
+            <b x-text="pie.total.toFixed(1)"></b>
+            <span>kWh</span>
+          </div>
         </div>
-        <div class="pie-box"><canvas :id="'pie-' + pie.id"></canvas></div>
         <table class="pie-legend">
           <template x-for="sl in pie.slices" :key="sl.label">
             <tr>

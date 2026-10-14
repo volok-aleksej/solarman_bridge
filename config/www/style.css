@@ -330,15 +330,20 @@ header {
   border-radius: 6px;
   padding: 12px 14px;
 }
-.pie-title {
-  display: flex;
-  justify-content: space-between;
-  font-size: 13px;
-  color: #57606a;
-  margin-bottom: 6px;
-}
-.pie-title b { color: #1f2328; font-size: 16px; }
+.pie-title { font-size: 13px; color: #57606a; margin-bottom: 6px; }
 .pie-box { position: relative; height: 180px; }
+/* Total in the hole of the doughnut; clicks go through to the chart. */
+.pie-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.pie-center b    { font-size: 20px; color: #1f2328; }
+.pie-center span { font-size: 11px; color: #57606a; }
 .pie-legend { width: 100%; margin-top: 8px; font-size: 12px; border-collapse: collapse; }
 .pie-legend td { padding: 2px 0; }
 .pie-legend td + td { text-align: right; font-weight: bold; }
