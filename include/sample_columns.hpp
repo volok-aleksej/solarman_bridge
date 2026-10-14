@@ -4,9 +4,9 @@
 
 #include <cstdint>
 
-// Every stored sample field, defined once. The SQLite schema, INSERT and
-// SELECT, and the JSON field names of the HTTP API are all generated from
-// this table so they cannot drift apart.
+// Every sample field, defined once. The SQLite schema, INSERT and SELECT,
+// and the JSON field names of the HTTP API are all generated from these
+// tables so they cannot drift apart.
 struct SampleColumn {
     const char* name;
     // Meaning, unit and source register. Also emitted as a comment into the
@@ -16,4 +16,7 @@ struct SampleColumn {
     void    (*set)(InverterSample&, int64_t);
 };
 
-extern const SampleColumn kSampleColumns[47];
+// Stored in the samples table and returned by api/history.
+extern const SampleColumn kSampleColumns[35];
+// Live only: returned by api/live, never stored per sample.
+extern const SampleColumn kCounterColumns[12];

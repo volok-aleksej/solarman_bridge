@@ -47,11 +47,18 @@ int64_t epoch_ms(std::chrono::system_clock::time_point t) {
                t.time_since_epoch()).count();
 }
 
-cJSON* sample_to_cjson(const InverterSample& s) {
+void add_columns(cJSON* o, const InverterSample& s,
+                 const SampleColumn* begin, const SampleColumn* end) {
+    for (const SampleColumn* c = begin; c != end; ++c)
+        cJSON_AddNumberToObject(o, c->name, c->get(s));
+}
+
+cJSON* sample_to_cjson(const InverterSample& s, bool with_counters) {
     cJSON* o = cJSON_CreateObject();
     cJSON_AddNumberToObject(o, "ts", epoch_ms(s.ts));
-    for (const auto& c : kSampleColumns)
-        cJSON_AddNumberToObject(o, c.name, c.get(s));
+    add_columns(o, s, std::begin(kSampleColumns), std::end(kSampleColumns));
+    if (with_counters)
+        add_columns(o, s, std::begin(kCounterColumns), std::end(kCounterColumns));
     return o;
 }
 
@@ -199,7 +206,7 @@ void HttpServer::handle_live(evhttp_request* req) {
     if (snap.sample) {
         cJSON_AddStringToObject(root.p, "run_state_name",
                                 run_state_name(snap.sample->run_state));
-        cJSON_AddItemToObject(root.p, "sample", sample_to_cjson(*snap.sample));
+        cJSON_AddItemToObject(root.p, "sample", sample_to_cjson(*snap.sample, true));
     }
     if (snap.clock) {
         char buf[20];
@@ -260,7 +267,7 @@ void HttpServer::handle_history(evhttp_request* req) {
     CJsonPtr root(cJSON_CreateObject());
     cJSON* arr = cJSON_AddArrayToObject(root.p, "data");
     for (const auto& s : data)
-        cJSON_AddItemToArray(arr, sample_to_cjson(s));
+        cJSON_AddItemToArray(arr, sample_to_cjson(s, false));
     send_json(req, HTTP_OK, cjson_print(root.p));
 }
 

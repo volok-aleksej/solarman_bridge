@@ -31,6 +31,7 @@ InverterSample sample_at(system_clock::time_point ts, int pv) {
     s.pv_power_w[0]      = pv;
     s.batt_power_w       = -pv;
     s.fault_bits         = 0x8000000000000001ULL;
+    s.grid_power_total_w = -3210;
     s.day_pv_wh          = pv * 10;
     s.total_grid_buy_wh  = 25310000;
     return s;
@@ -49,7 +50,10 @@ TEST_F(HistoryTest, RoundTripsEveryColumn) {
     EXPECT_EQ(rows[0].pv_power_w[0], 1234);
     EXPECT_EQ(rows[0].batt_power_w, -1234);
     EXPECT_EQ(rows[0].fault_bits, 0x8000000000000001ULL);
-    EXPECT_EQ(rows[0].total_grid_buy_wh, 25310000);
+    EXPECT_EQ(rows[0].grid_power_total_w, -3210);
+    // Energy counters live in daily_energy, not in samples.
+    EXPECT_EQ(rows[0].day_pv_wh, 0);
+    EXPECT_EQ(rows[0].total_grid_buy_wh, 0);
 }
 
 TEST_F(HistoryTest, DecimatesToNewestPerBucket) {

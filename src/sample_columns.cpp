@@ -1,6 +1,6 @@
 #include "sample_columns.hpp"
 
-// Array size is fixed by the declaration in the header: adding a column
+// Array sizes are fixed by the declarations in the header: adding a column
 // without bumping it there is a compile error.
 #define COL(name, field, desc)                                         \
     SampleColumn{name, desc,                                           \
@@ -90,7 +90,11 @@ const SampleColumn kSampleColumns[] = {
         "warning bitmask, 0 = none (regs 553..554, low word first)"),
     COL("fault_bits", fault_bits,
         "fault bitmask, 0 = none (regs 555..558, low word first)"),
+};
 
+// The inverter's energy counters change in 0.1 kWh steps and are already
+// kept per day in daily_energy, so they are not stored with every sample.
+const SampleColumn kCounterColumns[] = {
     // Inverter's own energy counters for the current day (reset at its midnight)
     COL("day_pv_wh", day_pv_wh,
         "PV energy today, Wh (reg 529, 0.1 kWh)"),
