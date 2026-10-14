@@ -235,7 +235,7 @@ TEST(Poller, RunsFullCyclesAndStoresSamples) {
         cfg.port = logger.port();
         cfg.serial = kSerial;
         cfg.poll_period_ms = 50;
-        Poller poller(d, cfg, state, history);
+        Poller poller(d, cfg, state, history, std::chrono::milliseconds(0));
         d.add_timer(10, [&] {
             if (state.snapshot().stats.cycles_ok >= 3) d.stop();
         });
@@ -323,7 +323,7 @@ protected:
         cfg.port = logger.port();
         cfg.serial = kSerial;
         cfg.poll_period_ms = 1000;
-        Poller poller(d, cfg, state, history);
+        Poller poller(d, cfg, state, history, std::chrono::milliseconds(0));
 
         CommandResult result;
         bool submitted = false;
@@ -384,4 +384,32 @@ TEST(InverterCommands, Whitelist) {
     ASSERT_NE(find_command("power_on"), nullptr);
     EXPECT_EQ(find_command("power_on")->reg, 80);
     EXPECT_EQ(find_command("reboot"), nullptr);
+}
+
+TEST(Poller, StoresOneSamplePerSamplePeriod) {
+    Dispatcher d;
+    FakeInverter inv;
+    FakeLogger logger(d, [&](int fd, const std::vector<uint8_t>& req) { inv.serve(fd, req); });
+
+    const std::string db = "/tmp/solarman_period_test_" + std::to_string(getpid()) + ".sqlite3";
+    InverterState state;
+    {
+        History history(db, 30);
+        LoggerConfig cfg;
+        cfg.host = "127.0.0.1";
+        cfg.port = logger.port();
+        cfg.serial = kSerial;
+        cfg.poll_period_ms = 20;
+        Poller poller(d, cfg, state, history, std::chrono::seconds(10));
+        d.add_timer(10, [&] {
+            if (state.snapshot().stats.cycles_ok >= 10) d.stop();
+        });
+        d.run();
+
+        const auto now = std::chrono::system_clock::now();
+        EXPECT_EQ(history.range(now - std::chrono::minutes(1),
+                                now + std::chrono::minutes(1), 0).size(), 1u);
+    }
+    for (const char* sfx : {"", "-wal", "-shm"}) std::remove((db + sfx).c_str());
+    EXPECT_GE(state.snapshot().stats.cycles_ok, 10u);
 }

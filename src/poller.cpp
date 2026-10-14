@@ -32,8 +32,10 @@ std::string block_name(const RegisterBlock& b) {
 }  // namespace
 
 Poller::Poller(Dispatcher& dispatcher, const LoggerConfig& cfg,
-               InverterState& state, History& history)
+               InverterState& state, History& history,
+               std::chrono::milliseconds sample_period)
     : dispatcher_(dispatcher), cfg_(cfg), state_(state), history_(history),
+      sample_period_(sample_period),
       client_(dispatcher, cfg.host, cfg.port, cfg.serial,
               std::chrono::milliseconds(cfg.timeout_ms)) {
     spdlog::info("poller: logger {}:{} serial {} slave {}, every {} ms",
@@ -176,7 +178,13 @@ void Poller::publish_sample() {
                   sample.grid_power_total_w, sample.load_power_total_w,
                   cycle_ms);
 
-    history_.append(sample, day);
+    // Half a poll period of slack, so cycle jitter does not push a stored
+    // sample to the next cycle.
+    const auto slack = std::chrono::milliseconds(cfg_.poll_period_ms / 2);
+    if (!last_stored_ || cycle_start_ - *last_stored_ >= sample_period_ - slack) {
+        history_.append(sample, day);
+        last_stored_ = cycle_start_;
+    }
     state_.apply_cycle(std::move(sample), clock, cycle_ms);
 }
 

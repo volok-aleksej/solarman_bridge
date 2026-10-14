@@ -10,6 +10,7 @@
 
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -78,7 +79,8 @@ int main(int argc, char** argv) {
 
     // The poller runs on the dispatcher thread, so History is written only
     // from here; the HTTP thread reads it through its own connection.
-    Poller     poller(dispatcher, cfg.logger, state, history);
+    Poller     poller(dispatcher, cfg.logger, state, history,
+                      std::chrono::milliseconds(cfg.history.sample_period_ms));
     HttpServer http_server(history, state, poller, cfg.logger, cfg.http,
                            cfg.control);
     http_server.start();

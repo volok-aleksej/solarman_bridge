@@ -37,8 +37,11 @@ class Poller {
 public:
     using CommandDone = std::function<void(const CommandResult&)>;
 
+    // Every cycle updates InverterState; History gets one sample per
+    // `sample_period`.
     Poller(Dispatcher& dispatcher, const LoggerConfig& cfg,
-           InverterState& state, History& history);
+           InverterState& state, History& history,
+           std::chrono::milliseconds sample_period);
     ~Poller();
 
     Poller(const Poller&) = delete;
@@ -81,6 +84,7 @@ private:
     LoggerConfig   cfg_;
     InverterState& state_;
     History&       history_;
+    std::chrono::milliseconds sample_period_;
     V5Client       client_;
     Timer          cycle_timer_;
     Timer          purge_timer_;
@@ -97,6 +101,8 @@ private:
     std::optional<Command> command_;
     std::mutex             queue_mtx_;
     std::deque<Command>    queue_;
+
+    std::optional<Clock::time_point> last_stored_;
 
     bool identity_known_ = false;
     // Log the first failure of a streak loudly, the repeats quietly, so an

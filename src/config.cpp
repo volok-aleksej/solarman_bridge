@@ -25,7 +25,7 @@ cfg_opt_t logger_opts[] = {
     CFG_INT("port",           8899,    CFGF_NONE),
     CFG_INT("slave_id",       1,       CFGF_NONE),
     CFG_INT("timeout_ms",     5000,    CFGF_NONE),
-    CFG_INT("poll_period_ms", 5000,    CFGF_NONE),
+    CFG_INT("poll_period_ms", 1000,    CFGF_NONE),
     CFG_INT("reconnect_ms",   10000,   CFGF_NONE),
     CFG_END()
 };
@@ -39,6 +39,7 @@ cfg_opt_t http_opts[] = {
 cfg_opt_t history_opts[] = {
     CFG_STR("db_path", "/var/lib/solarman_bridge/history.sqlite3", CFGF_NONE),
     CFG_INT("retention_days", 30, CFGF_NONE),
+    CFG_INT("sample_period_ms", 5000, CFGF_NONE),
     CFG_END()
 };
 
@@ -75,6 +76,7 @@ bool load_config(const std::string& path, AppConfig& out, std::string& error) {
     cfg_set_validate_func(cfg, "logger|reconnect_ms",    vf_range<1000, 3600000>);
     cfg_set_validate_func(cfg, "http|port",              vf_range<1, 65535>);
     cfg_set_validate_func(cfg, "history|retention_days", vf_range<1, 3650>);
+    cfg_set_validate_func(cfg, "history|sample_period_ms", vf_range<1000, 3600000>);
 
     int rc = cfg_parse(cfg, path.c_str());
     if (rc == CFG_FILE_ERROR) {
@@ -115,7 +117,8 @@ bool load_config(const std::string& path, AppConfig& out, std::string& error) {
     }
     if (cfg_t* s = cfg_getsec(cfg, "history")) {
         out.history.db_path        = sstr(s, "db_path");
-        out.history.retention_days = cfg_getint(s, "retention_days");
+        out.history.retention_days   = cfg_getint(s, "retention_days");
+        out.history.sample_period_ms = cfg_getint(s, "sample_period_ms");
     }
 
     if (cfg_t* s = cfg_getsec(cfg, "control"))

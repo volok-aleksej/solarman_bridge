@@ -9,7 +9,7 @@ struct LoggerConfig {
     uint32_t    serial         = 0;     // logger (not inverter) serial number
     uint8_t     slave_id       = 1;
     int         timeout_ms     = 5000;
-    int         poll_period_ms = 5000;
+    int         poll_period_ms = 1000;
     int         reconnect_ms   = 10000;
 };
 
@@ -21,6 +21,7 @@ struct HttpConfig {
 struct HistoryConfig {
     std::string db_path = "/var/lib/solarman_bridge/history.sqlite3";
     int retention_days = 30;
+    int sample_period_ms = 5000;   // one stored sample per this many ms
 };
 
 struct ControlConfig {
