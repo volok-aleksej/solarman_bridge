@@ -17,6 +17,6 @@ struct SampleColumn {
 };
 
 // Stored in the samples table and returned by api/history.
-extern const SampleColumn kSampleColumns[35];
+extern const SampleColumn kSampleColumns[38];
 // Live only: returned by api/live, never stored per sample.
 extern const SampleColumn kCounterColumns[12];

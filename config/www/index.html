@@ -33,51 +33,91 @@
 
   <template x-if="s">
   <div>
-    <div class="flow-row">
-      <div class="flow-card">
-        <div class="flow-title">Solar PV</div>
-        <div class="flow-power pos" x-text="kw(s.pv1_power_w + s.pv2_power_w)"></div>
-        <div class="flow-line"><span>PV1</span><span x-text="pvText(1)"></span></div>
-        <div class="flow-line"><span>PV2</span><span x-text="pvText(2)"></span></div>
-        <div class="flow-line"><span>Today</span><span x-text="kwh(s.day_pv_wh)"></span></div>
-      </div>
+    <!-- Power flow, laid out like the inverter's own home screen. Each line
+         is drawn from its node towards the centre; "in" animates along it,
+         "out" against it. -->
+    <svg class="flow-svg" viewBox="0 0 640 370">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5"
+                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#1a7f37"/>
+        </marker>
+      </defs>
 
-      <div class="flow-card">
-        <div class="flow-title">Battery</div>
-        <div class="flow-power" :class="s.batt_power_w < 0 ? 'pos' : s.batt_power_w > 0 ? 'neg' : ''">
-          <span x-text="kw(Math.abs(s.batt_power_w))"></span>
-          <span class="flow-dir" x-text="s.batt_power_w < 0 ? 'charging' : s.batt_power_w > 0 ? 'discharging' : 'idle'"></span>
-        </div>
-        <div class="soc-bar-outer"><div class="soc-bar-inner" :style="`width:${s.batt_soc_pct}%`"></div></div>
-        <div class="flow-line"><span>SoC</span><span x-text="s.batt_soc_pct + ' %'"></span></div>
-        <div class="flow-line"><span>Voltage / current</span>
-          <span x-text="(s.batt_voltage_mv/1000).toFixed(2)+' V / '+(s.batt_current_ma/1000).toFixed(2)+' A'"></span></div>
-        <div class="flow-line"><span>Temperature</span><span x-text="degC(s.batt_temp_dc)"></span></div>
-        <div class="flow-line"><span>Today chg / dis</span>
-          <span x-text="kwh(s.day_batt_charge_wh)+' / '+kwh(s.day_batt_discharge_wh)"></span></div>
-      </div>
+      <!-- Alpine cannot loop inside SVG (no <template> there): one path each. -->
+      <path class="flow-path" d="M175,90 H245 V170 H284" :class="flowDir('pv')"
+            :marker-end="flowDir('pv')==='in' ? 'url(#arrow)' : null"
+            :marker-start="flowDir('pv')==='out' ? 'url(#arrow)' : null"></path>
+      <path class="flow-path" d="M175,270 H245 V190 H284" :class="flowDir('batt')"
+            :marker-end="flowDir('batt')==='in' ? 'url(#arrow)' : null"
+            :marker-start="flowDir('batt')==='out' ? 'url(#arrow)' : null"></path>
+      <path class="flow-path" d="M465,90 H395 V170 H356" :class="flowDir('grid')"
+            :marker-end="flowDir('grid')==='in' ? 'url(#arrow)' : null"
+            :marker-start="flowDir('grid')==='out' ? 'url(#arrow)' : null"></path>
+      <path class="flow-path" d="M465,270 H395 V190 H356" :class="flowDir('load')"
+            :marker-end="flowDir('load')==='in' ? 'url(#arrow)' : null"
+            :marker-start="flowDir('load')==='out' ? 'url(#arrow)' : null"></path>
 
-      <div class="flow-card">
-        <div class="flow-title">Grid</div>
-        <div class="flow-power" :class="s.grid_power_w > 0 ? 'neg' : s.grid_power_w < 0 ? 'pos' : ''">
-          <span x-text="kw(Math.abs(s.grid_power_w))"></span>
-          <span class="flow-dir" x-text="s.grid_power_w > 0 ? 'import' : s.grid_power_w < 0 ? 'export' : ''"></span>
-        </div>
-        <div class="flow-line"><span>Frequency</span><span x-text="(s.grid_freq_chz/100).toFixed(2)+' Hz'"></span></div>
-        <div class="flow-line"><span>Today buy / sell</span>
-          <span x-text="kwh(s.day_grid_buy_wh)+' / '+kwh(s.day_grid_sell_wh)"></span></div>
-        <div class="flow-line"><span>Total buy / sell</span>
-          <span x-text="kwh(s.total_grid_buy_wh)+' / '+kwh(s.total_grid_sell_wh)"></span></div>
-      </div>
+      <g class="flow-center" :class="{clickable: canControl()}" @click="toggleInverter()">
+        <circle cx="320" cy="180" r="34" :class="s.run_state===2 ? 'on' : 'off'"></circle>
+        <text x="320" y="186" text-anchor="middle"
+              x-text="s.run_state===2 ? 'ON' : live.run_state_name.toUpperCase()"></text>
+      </g>
 
-      <div class="flow-card">
-        <div class="flow-title">Load</div>
-        <div class="flow-power" x-text="kw(s.load_power_w)"></div>
-        <div class="flow-line"><span>Inverter output</span><span x-text="kw(s.inv_power_w)"></span></div>
-        <div class="flow-line"><span>Today</span><span x-text="kwh(s.day_load_wh)"></span></div>
-        <div class="flow-line"><span>Total</span><span x-text="kwh(s.total_load_wh)"></span></div>
-      </div>
+      <!-- Under each node: power now, current now, energy today. -->
+      <g class="flow-node" transform="translate(110,90)">
+        <text class="fn-icon" y="-30">&#9728;&#65039;</text>
+        <text class="fn-value pos" y="10" x-text="watts(s.pv1_power_w + s.pv2_power_w)"></text>
+        <text class="fn-sub" y="30" x-text="amps(s.pv1_current_ma + s.pv2_current_ma)"></text>
+        <text class="fn-sub" y="48" x-text="'generated ' + kwh(s.day_pv_wh)"></text>
+      </g>
+      <g class="flow-node" transform="translate(110,270)">
+        <text class="fn-icon" y="-30">&#128267;</text>
+        <text class="fn-soc" y="-6" x-text="s.batt_soc_pct + ' %'"></text>
+        <text class="fn-value" y="18" :class="s.batt_power_w < 0 ? 'pos' : s.batt_power_w > 0 ? 'neg' : ''"
+              x-text="watts(s.batt_power_w)"></text>
+        <text class="fn-sub" y="38" x-text="amps(s.batt_current_ma)"></text>
+        <text class="fn-sub" y="56" x-text="'charged ' + kwh(s.day_batt_charge_wh)"></text>
+        <text class="fn-sub" y="72" x-text="'discharged ' + kwh(s.day_batt_discharge_wh)"></text>
+      </g>
+      <g class="flow-node" transform="translate(530,90)">
+        <text class="fn-icon" y="-30">&#9889;</text>
+        <text class="fn-value" y="10" :class="s.grid_power_w > 0 ? 'neg' : s.grid_power_w < 0 ? 'pos' : ''"
+              x-text="watts(s.grid_power_w)"></text>
+        <text class="fn-sub" y="30" x-text="amps(s.grid_l1_current_ma + s.grid_l2_current_ma + s.grid_l3_current_ma)"></text>
+        <text class="fn-sub" y="48" x-text="'bought ' + kwh(s.day_grid_buy_wh)"></text>
+        <text class="fn-sub" y="64" x-text="'sold ' + kwh(s.day_grid_sell_wh)"></text>
+      </g>
+      <g class="flow-node" transform="translate(530,270)">
+        <text class="fn-icon" y="-30">&#127968;</text>
+        <text class="fn-value" y="10" x-text="watts(s.load_power_w)"></text>
+        <text class="fn-sub" y="30" x-text="'≈ ' + amps(loadCurrentMa())"></text>
+        <text class="fn-sub" y="48" x-text="'consumed ' + kwh(s.day_load_wh)"></text>
+      </g>
+    </svg>
+
+    <div class="status-strip">
+      <span class="flag" :class="live.run_state_name==='normal' ? 'on' : 'err'"
+            x-text="'State: '+live.run_state_name"></span>
+      <span class="flag err" x-show="s.fault_bits"
+            x-text="'Faults: 0x'+s.fault_bits.toString(16).toUpperCase()"></span>
+      <span class="flag err" x-show="s.warning_bits"
+            x-text="'Warnings: 0x'+s.warning_bits.toString(16).toUpperCase()"></span>
+      <span class="sep"></span>
+      <span class="muted" x-text="live.inverter_time ? 'Inverter clock: '+live.inverter_time : ''"></span>
+      <span class="muted" x-text="cmdStatus"></span>
     </div>
+
+    <details class="rt-details">
+      <summary>Details</summary>
+      <div class="info-grid">
+        <template x-for="row in detailRows()" :key="row[0]">
+          <div class="info-row">
+            <span class="ir-label" x-text="row[0]"></span>
+            <span class="ir-value" x-text="row[1]"></span>
+          </div>
+        </template>
+      </div>
 
     <div class="phase-wrap">
       <table class="phase-table">
@@ -99,19 +139,7 @@
       </table>
     </div>
 
-    <div class="status-strip">
-      <span class="flag" :class="live.run_state_name==='normal' ? 'on' : 'err'"
-            x-text="'State: '+live.run_state_name"></span>
-      <span class="flag" :class="s.fault_bits ? 'err' : 'off'"
-            x-text="'Faults: '+(s.fault_bits ? '0x'+s.fault_bits.toString(16).toUpperCase() : '0')"></span>
-      <span class="flag" :class="s.warning_bits ? 'err' : 'off'"
-            x-text="'Warnings: '+(s.warning_bits ? '0x'+s.warning_bits.toString(16).toUpperCase() : '0')"></span>
-      <span class="sep"></span>
-      <span class="muted" x-text="'DC: '+degC(s.dc_temp_dc)"></span>
-      <span class="muted" x-text="'AC: '+degC(s.ac_temp_dc)"></span>
-      <span class="sep"></span>
-      <span class="muted" x-text="live.inverter_time ? 'Inverter clock: '+live.inverter_time : ''"></span>
-    </div>
+    </details>
   </div>
   </template>
 

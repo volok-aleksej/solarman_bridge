@@ -56,7 +56,7 @@ TEST(DeyeRegisters, LiveSample) {
     b.put(540, {1250, 1497});          // DC / AC temp
     b.put(586, {1197, 5228, 25, 0, 22, 9});
     b.put(598, {2434, 2382, 2431});
-    b.put(609, {4995});
+    b.put(609, {4995, 80, 0xFF8E});   // freq, CT current L1, L2 = -1.14 A
     b.put(622, {994, 819, 5, 1818});
     b.put(633, {54, 318, 55, 427});
     b.put(650, {1312, 2074, 94, 3480});
@@ -82,6 +82,8 @@ TEST(DeyeRegisters, LiveSample) {
     EXPECT_EQ(s.grid_voltage_mv[1], 238200);
     EXPECT_EQ(s.grid_freq_chz, 4995);
     EXPECT_EQ(s.grid_power_w[0], 994);
+    EXPECT_EQ(s.grid_current_ma[0], 800);
+    EXPECT_EQ(s.grid_current_ma[1], -1140);
     EXPECT_EQ(s.grid_power_total_w, 1818);
     EXPECT_EQ(s.inv_power_total_w, 427);
     EXPECT_EQ(s.load_power_w[1], 2074);

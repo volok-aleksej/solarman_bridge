@@ -99,6 +99,7 @@ InverterSample decode_sample(const RegisterBank& b) {
     for (int p = 0; p < kPhases; ++p) {
         s.grid_voltage_mv[p] = b.u16(598 + p) * 100;
         s.grid_power_w[p]    = b.s16(622 + p);
+        s.grid_current_ma[p] = b.s16(610 + p) * 10;
         s.inv_power_w[p]     = b.s16(633 + p);
         s.load_voltage_mv[p] = b.u16(644 + p) * 100;
         s.load_power_w[p]    = b.s16(650 + p);

@@ -343,32 +343,6 @@ canvas { display: block; width: 100%; }
 }
 .chart-box.sm { height: 170px; }
 
-/* ── Inverter: power flow cards ─────────────────────────── */
-
-.flow-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px;
-  padding: 16px;
-}
-
-.flow-card {
-  background: #ffffff;
-  border: 1px solid #d0d7de;
-  border-radius: 6px;
-  padding: 12px 14px;
-}
-
-.flow-title { color: #57606a; font-size: 12px; text-transform: uppercase; }
-.flow-power { font-size: 26px; margin: 2px 0 6px; white-space: nowrap; }
-.flow-power.pos { color: #1a7f37; }
-.flow-power.neg { color: #cf222e; }
-.flow-dir   { font-size: 12px; color: #57606a; margin-left: 6px; }
-.flow-line  { font-size: 12px; color: #1f2328; display: flex; justify-content: space-between; }
-.flow-line span:first-child { color: #57606a; }
-
-.flow-card .soc-bar-outer { margin: 6px 0; width: 100%; height: 14px; }
-
 /* ── Inverter: per-phase table ──────────────────────────── */
 
 .phase-wrap { padding: 0 16px 16px; overflow-x: auto; }
@@ -398,3 +372,50 @@ canvas { display: block; width: 100%; }
   border-radius: 4px;
   font-size: 13px;
 }
+
+/* ── Power flow diagram ──────────────────────────────────── */
+
+.flow-svg {
+  display: block;
+  width: 100%;
+  max-width: 760px;
+  margin: 8px auto 0;
+  font-family: monospace;
+}
+
+.flow-path {
+  fill: none;
+  stroke: #d0d7de;
+  stroke-width: 2;
+  stroke-dasharray: 6 6;
+}
+.flow-path.in, .flow-path.out {
+  stroke: #1a7f37;
+  animation: flow-dash 0.8s linear infinite;
+}
+.flow-path.out { animation-direction: reverse; }
+@keyframes flow-dash { to { stroke-dashoffset: -12; } }
+
+.flow-center circle     { fill: #ffffff; stroke-width: 3; }
+.flow-center circle.on  { stroke: #1a7f37; }
+.flow-center circle.off { stroke: #cf222e; }
+.flow-center text       { font-size: 15px; font-weight: bold; fill: #1f2328; }
+.flow-center.clickable  { cursor: pointer; }
+.flow-center.clickable:hover circle { fill: #f6f8fa; }
+
+.flow-node text   { text-anchor: middle; fill: #1f2328; }
+.fn-icon          { font-size: 34px; }
+.fn-soc           { font-size: 13px; font-weight: bold; }
+.fn-value         { font-size: 20px; font-weight: bold; }
+.fn-value.pos     { fill: #1a7f37; }
+.fn-value.neg     { fill: #cf222e; }
+.fn-sub           { font-size: 12px; fill: #57606a; }
+
+.rt-details { margin: 0 0 24px; }
+.rt-details summary {
+  cursor: pointer;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: #57606a;
+}
+.rt-details .info-grid { margin-bottom: 12px; }

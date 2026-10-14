@@ -62,6 +62,7 @@ struct InverterSample {
     // Grid (+ import / − export)
     int32_t  grid_voltage_mv[kPhases] = {};
     int32_t  grid_power_w[kPhases]    = {};
+    int32_t  grid_current_ma[kPhases] = {};   // inverter's internal CT
     int32_t  grid_power_total_w       = 0;
     int32_t  grid_freq_chz            = 0;
 
