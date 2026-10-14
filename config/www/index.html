@@ -158,9 +158,51 @@
     <button @click="shiftEnergyMonth(1)" :disabled="!canNextEnergyMonth()">&rarr;</button>
     <span class="hdr-status" x-text="energyStatus"></span>
   </div>
-  <div class="energy-totals" x-show="energyTotals" x-text="energyTotals"></div>
+
+  <div class="energy-pies">
+    <template x-for="pie in energyPies" :key="pie.id">
+      <div class="pie-card">
+        <div class="pie-title">
+          <span x-text="pie.title"></span>
+          <b x-text="pie.total.toFixed(1) + ' kWh'"></b>
+        </div>
+        <div class="pie-box"><canvas :id="'pie-' + pie.id"></canvas></div>
+        <table class="pie-legend">
+          <template x-for="sl in pie.slices" :key="sl.label">
+            <tr>
+              <td><span class="swatch" :style="'background:' + sl.color"></span><span x-text="sl.label"></span></td>
+              <td x-text="sl.kwh.toFixed(1) + ' kWh'"></td>
+              <td x-text="pie.total > 0 ? Math.round(sl.kwh / pie.total * 100) + ' %' : '—'"></td>
+            </tr>
+          </template>
+        </table>
+      </div>
+    </template>
+  </div>
+  <div class="energy-note">
+    Split from the inverter's daily counters: solar is sold and charges the
+    battery first, the rest feeds the load; the load takes solar, then the
+    battery, and the grid covers the remainder.
+  </div>
+
+  <div class="phase-wrap">
+    <table class="phase-table">
+      <thead><tr><th>Month total</th><th>kWh</th></tr></thead>
+      <tbody>
+        <template x-for="row in energyTotals" :key="row[0]">
+          <tr><td x-text="row[0]"></td><td x-text="row[1]"></td></tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="rt-tabs">
+    <template x-for="t in RT_TABS" :key="t.id">
+      <button :class="{on: energyTab===t.id}" @click="energyTab=t.id; drawEnergyBars()" x-text="t.label"></button>
+    </template>
+  </div>
   <div class="charts">
-    <div class="chart-box" style="height:320px"><canvas id="ce"></canvas></div>
+    <div class="chart-box" style="height:280px"><canvas id="ce"></canvas></div>
   </div>
 </div>
 

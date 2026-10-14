@@ -45,6 +45,33 @@ const C = {
 
 let CHARTS       = null;
 let ENERGY_CHART = null;
+let ENERGY_PIES  = {};     // id -> Chart
+let ENERGY_ROWS  = [];     // daily_energy row or null, one per day of the month
+
+// Daily bar series of each Energy tab: [label, daily_energy field, color].
+const ENERGY_BARS = {
+  batt: [['Charged', 'batt_charge_wh', C.batt], ['Discharged', 'batt_discharge_wh', C.dis]],
+  pv:   [['Generated', 'pv_wh', C.pv]],
+  grid: [['Bought', 'grid_buy_wh', C.grid], ['Sold', 'grid_sell_wh', C.sell]],
+  load: [['Consumed', 'load_wh', C.load]],
+};
+
+// Where one day's energy came from and went to, in Wh, from the daily
+// counters alone. Solar is sold first (only solar is assumed to be sold),
+// then charges the battery, and the rest feeds the load. The load takes
+// solar first, then the battery; the grid covers what is left.
+function splitDay(e) {
+  const pvToGrid   = Math.min(e.grid_sell_wh, e.pv_wh);
+  const pvToBatt   = Math.min(e.batt_charge_wh, e.pv_wh - pvToGrid);
+  const pvToLoad   = e.pv_wh - pvToGrid - pvToBatt;
+  const loadFromPv = Math.min(e.load_wh, pvToLoad);
+  const battToLoad = Math.min(e.batt_discharge_wh, e.load_wh - loadFromPv);
+  return {
+    pvToLoad, pvToBatt, pvToGrid,
+    loadFromPv, battToLoad,
+    gridToLoad: e.load_wh - loadFromPv - battToLoad,
+  };
+}
 
 function fmtAxisTime(ms, spanMs) {
   const d = new Date(ms);
@@ -138,7 +165,9 @@ function inverter() {
     energyYear:   new Date().getFullYear(),
     energyMonth:  new Date().getMonth() + 1,
     energyStatus: '',
-    energyTotals: '',
+    energyTotals: [],
+    energyPies:   [],
+    energyTab:    'batt',
     rtTab:        'batt',
     RT_TABS,
     cmdBusy:      false,
@@ -415,6 +444,51 @@ function inverter() {
       });
     },
 
+    drawEnergyBars() {
+      if (!ENERGY_CHART) return;
+      ENERGY_CHART.data.labels = ENERGY_ROWS.map((_, i) => String(i + 1));
+      ENERGY_CHART.data.datasets = ENERGY_BARS[this.energyTab].map(([label, key, color]) => ({
+        label, backgroundColor: color, borderColor: color,
+        data: ENERGY_ROWS.map(e => e ? e[key] / 1000 : 0),
+      }));
+      ENERGY_CHART.update('none');
+    },
+
+    _drawPies() {
+      for (const pie of this.energyPies) {
+        const cv = document.getElementById('pie-' + pie.id);
+        if (!cv || !window.Chart) continue;
+        const data = {
+          labels:   pie.slices.map(sl => sl.label),
+          datasets: [{ data: pie.slices.map(sl => sl.kwh),
+                       backgroundColor: pie.slices.map(sl => sl.color),
+                       borderWidth: 1 }],
+        };
+        if (ENERGY_PIES[pie.id]) {
+          ENERGY_PIES[pie.id].data = data;
+          ENERGY_PIES[pie.id].update('none');
+          continue;
+        }
+        ENERGY_PIES[pie.id] = new window.Chart(cv, {
+          type: 'doughnut',
+          data,
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            cutout: '55%',
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                titleFont: AXIS_FONT, bodyFont: AXIS_FONT,
+                callbacks: { label: ctx => ctx.label + ': ' + ctx.parsed.toFixed(1) + ' kWh' },
+              },
+            },
+          },
+        });
+      }
+    },
+
     async loadEnergy() {
       this.energyStatus = 'loading…';
       try {
@@ -422,38 +496,50 @@ function inverter() {
         if (!r.ok) throw new Error(r.status);
         const j = await r.json();
 
-        await this.$nextTick();
-        if (!ENERGY_CHART) this._initEnergyChart();
-        if (!ENERGY_CHART) { this.energyStatus = 'chart error'; return; }
-        ENERGY_CHART.resize();
-
         const days = new Date(this.energyYear, this.energyMonth, 0).getDate();
         const byDate = {};
         j.data.forEach(d => { byDate[d.date] = d; });
         const prefix = `${this.energyYear}-${String(this.energyMonth).padStart(2, '0')}-`;
-        const rows = [];
+        ENERGY_ROWS = [];
         for (let day = 1; day <= days; day++)
-          rows.push(byDate[prefix + String(day).padStart(2, '0')] || null);
+          ENERGY_ROWS.push(byDate[prefix + String(day).padStart(2, '0')] || null);
 
-        const fields = [
-          ['PV',             'pv_wh',             C.pv],
-          ['Load',           'load_wh',           C.load],
-          ['Grid buy',       'grid_buy_wh',       C.grid],
-          ['Grid sell',      'grid_sell_wh',      C.sell],
-          ['Batt charge',    'batt_charge_wh',    C.batt],
-          ['Batt discharge', 'batt_discharge_wh', C.dis],
+        const sum = {};
+        for (const e of j.data) {
+          const parts = Object.assign({}, e, splitDay(e));
+          for (const k in parts)
+            if (typeof parts[k] === 'number') sum[k] = (sum[k] || 0) + parts[k];
+        }
+        const k = key => (sum[key] || 0) / 1000;
+
+        this.energyPies = [
+          { id: 'load', title: 'Consumption', total: k('load_wh'), slices: [
+              { label: 'From solar',   kwh: k('loadFromPv'), color: C.pv },
+              { label: 'From battery', kwh: k('battToLoad'), color: C.batt },
+              { label: 'From grid',    kwh: k('gridToLoad'), color: C.grid },
+          ] },
+          { id: 'pv', title: 'Generation', total: k('pv_wh'), slices: [
+              { label: 'To load',      kwh: k('pvToLoad'),   color: C.load },
+              { label: 'To battery',   kwh: k('pvToBatt'),   color: C.batt },
+              { label: 'To grid',      kwh: k('pvToGrid'),   color: C.sell },
+          ] },
         ];
-        ENERGY_CHART.data.labels = rows.map((_, i) => String(i + 1));
-        ENERGY_CHART.data.datasets = fields.map(([label, key, color]) => ({
-          label, backgroundColor: color, borderColor: color,
-          data: rows.map(e => e ? e[key] / 1000 : 0),
-        }));
-        ENERGY_CHART.update('none');
+        this.energyTotals = [
+          ['Solar generated',     k('pv_wh').toFixed(1)],
+          ['Load consumed',       k('load_wh').toFixed(1)],
+          ['Grid bought',         k('grid_buy_wh').toFixed(1)],
+          ['Grid sold',           k('grid_sell_wh').toFixed(1)],
+          ['Battery charged',     k('batt_charge_wh').toFixed(1)],
+          ['Battery discharged',  k('batt_discharge_wh').toFixed(1)],
+        ];
 
-        const total = key => j.data.reduce((a, e) => a + e[key], 0) / 1000;
-        this.energyTotals = j.data.length
-          ? fields.map(([label, key]) => `${label}: ${total(key).toFixed(1)} kWh`).join('   ')
-          : '';
+        await this.$nextTick();
+        this._drawPies();
+        if (!ENERGY_CHART) this._initEnergyChart();
+        if (!ENERGY_CHART) { this.energyStatus = 'chart error'; return; }
+        ENERGY_CHART.resize();
+        this.drawEnergyBars();
+
         this.energyStatus = j.data.length
           ? new Date().toLocaleTimeString() : 'no data for this month';
       } catch (e) {
