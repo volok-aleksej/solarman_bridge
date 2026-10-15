@@ -33,9 +33,12 @@ file(GLOB_RECURSE CORE_HEADERS CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
 )
 
-# All production code as one static lib, shared between the main binary and
+# All production code as one object lib, shared between the main binary and
 # the test binary; main.cpp stays out so gtest_main owns the test entry point.
-add_library(solarman_core STATIC ${CORE_SOURCES} ${CORE_HEADERS})
+# OBJECT, not STATIC: every object is linked in, so the model files in
+# src/models/, which nothing references and which only register themselves,
+# are not dropped by the linker.
+add_library(solarman_core OBJECT ${CORE_SOURCES} ${CORE_HEADERS})
 target_include_directories(solarman_core PUBLIC include)
 target_link_libraries(solarman_core PUBLIC
     PkgConfig::CONFUSE

@@ -2,6 +2,7 @@
 #include "dispatcher.hpp"
 #include "history.hpp"
 #include "http_server.hpp"
+#include "inverter_model.hpp"
 #include "inverter_state.hpp"
 #include "logger.hpp"
 #include "poller.hpp"
@@ -77,9 +78,11 @@ int main(int argc, char** argv) {
 
     // The poller runs on the dispatcher thread, so History is written only
     // from here; the HTTP thread reads it through its own connection.
-    Poller     poller(dispatcher, cfg.logger, state, history,
+    // load_config() has checked that the model exists.
+    const InverterModel& model = *find_model(cfg.logger.model);
+    Poller     poller(dispatcher, cfg.logger, model, state, history,
                       std::chrono::milliseconds(cfg.history.sample_period_ms));
-    HttpServer http_server(history, state, cfg.logger, cfg.http,
+    HttpServer http_server(history, state, model, cfg.logger, cfg.http,
                            cfg.control);
     http_server.start();
 

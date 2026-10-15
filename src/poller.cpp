@@ -8,7 +8,6 @@
 #include <spdlog/spdlog.h>
 
 #include <ctime>
-#include <iterator>
 
 namespace {
 
@@ -47,15 +46,15 @@ bool read_one(const std::vector<uint8_t>& modbus, uint8_t slave, uint16_t& value
 }  // namespace
 
 Poller::Poller(Dispatcher& dispatcher, const LoggerConfig& cfg,
-               InverterState& state, History& history,
+               const InverterModel& model, InverterState& state, History& history,
                std::chrono::milliseconds sample_period)
-    : dispatcher_(dispatcher), cfg_(cfg), state_(state), history_(history),
+    : dispatcher_(dispatcher), cfg_(cfg), model_(model), state_(state), history_(history),
       sample_period_(sample_period),
       client_(dispatcher, cfg.host, cfg.port, cfg.serial,
               std::chrono::milliseconds(cfg.timeout_ms),
               std::chrono::milliseconds(cfg.reconnect_ms), kMaxQueue) {
-    spdlog::info("poller: logger {}:{} serial {} slave {}, every {} ms",
-                 cfg_.host, cfg_.port, cfg_.serial, cfg_.slave_id,
+    spdlog::info("poller: {} via logger {}:{} serial {} slave {}, every {} ms",
+                 model_.name, cfg_.host, cfg_.port, cfg_.serial, cfg_.slave_id,
                  cfg_.poll_period_ms);
     dispatcher_.watch(timer_.fd(), [this] {
         timer_.consume();
@@ -82,27 +81,26 @@ void Poller::on_tick() {
 // ---- poll cycle --------------------------------------------------------------
 
 void Poller::start_cycle() {
-    std::vector<RegisterBlock> blocks;
     // The identity does not change; it is read until it is known.
-    if (!state_.has_identity()) blocks.push_back(kIdentityBlock);
-    blocks.push_back(kClockBlock);
-    blocks.insert(blocks.end(), std::begin(kLiveBlocks), std::end(kLiveBlocks));
+    const bool with_identity = !state_.has_identity();
 
     auto c = std::make_shared<Cycle>();
     c->start = Clock::now();
-    c->left  = blocks.size();
-    for (const RegisterBlock& b : blocks) {
+    c->left  = model_.blocks.size() + with_identity;
+    auto read = [&](const RegisterBlock& b, bool identity) {
         const bool queued = client_.submit(
             modbus::build_read_holding(cfg_.slave_id, b.addr, b.count),
-            [this, c, b](bool ok, std::vector<uint8_t> mb, const std::string& e) {
-                on_block(*c, b, ok, mb, e);
+            [this, c, b, identity](bool ok, std::vector<uint8_t> mb, const std::string& e) {
+                on_block(*c, b, identity, ok, mb, e);
             },
             false);
         if (!queued) block_done(*c, block_name(b) + ": not queued");
-    }
+    };
+    if (with_identity) read(model_.identity, true);
+    for (const RegisterBlock& b : model_.blocks) read(b, false);
 }
 
-void Poller::on_block(Cycle& c, const RegisterBlock& b, bool ok,
+void Poller::on_block(Cycle& c, const RegisterBlock& b, bool identity, bool ok,
                       const std::vector<uint8_t>& modbus, const std::string& error) {
     std::vector<uint16_t> regs;
     std::string perr;
@@ -112,7 +110,7 @@ void Poller::on_block(Cycle& c, const RegisterBlock& b, bool ok,
         block_done(c, block_name(b) + ": " + perr);
     } else {
         c.bank.put(b.addr, regs);
-        if (b.addr == kIdentityBlock.addr) publish_identity(c.bank);
+        if (identity) publish_identity(c.bank);
         block_done(c, {});
     }
 }
@@ -123,12 +121,12 @@ void Poller::block_done(Cycle& c, std::string error) {
 }
 
 void Poller::publish_identity(const RegisterBank& bank) {
-    InverterIdentity id = decode_identity(bank);
+    InverterIdentity id = model_.decode_identity(bank);
     spdlog::info("poller: inverter serial {} device type {}",
                  id.serial, id.device_type);
-    if (id.device_type != 5)
-        spdlog::warn("poller: device type {} is not the SG04LP3 the register "
-                     "map was written for; values may be wrong", id.device_type);
+    if (model_.device_type && id.device_type != model_.device_type)
+        spdlog::warn("poller: device type {}, but model {} expects {}; values "
+                     "may be wrong", id.device_type, model_.name, model_.device_type);
     state_.set_identity(std::move(id));
 }
 
@@ -146,8 +144,8 @@ void Poller::finish_cycle(Cycle& c) {
     if (failing_) spdlog::info("poller: inverter answering again");
     failing_ = false;
 
-    InverterSample sample = decode_sample(c.bank);
-    std::optional<InverterClock> clock = decode_clock(c.bank);
+    InverterSample sample = model_.decode_sample(c.bank);
+    std::optional<InverterClock> clock = model_.decode_clock(c.bank);
     const int64_t cycle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  Clock::now() - c.start).count();
     spdlog::trace("poller: pv={}W batt={}W soc={}% grid={}W load={}W ({} ms)",

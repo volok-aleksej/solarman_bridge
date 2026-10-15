@@ -4,6 +4,7 @@
 #include <string>
 
 struct LoggerConfig {
+    std::string model;                  // InverterModel::name
     std::string host;
     uint16_t    port           = 8899;
     uint32_t    serial         = 0;     // logger (not inverter) serial number

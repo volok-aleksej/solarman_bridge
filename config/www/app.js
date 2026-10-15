@@ -304,7 +304,7 @@ function inverter() {
     // The centre button switches the inverter, when control is enabled.
     toggleInverter() {
       if (!this.canControl()) return;
-      const name = this.s.run_state === 2 ? 'power_off' : 'power_on';
+      const name = this.live.running ? 'power_off' : 'power_on';
       const c = this.info.control.commands.find(c => c.name === name);
       if (c) this.runCommand(c);
     },

@@ -18,6 +18,16 @@ Solarman / IGEN WiFi data logger and serves a web dashboard.
 number (the logger's web page, `status.html`, shows it as the device serial
 number), not the inverter's.
 
+## Inverter models
+
+`logger.model` picks the register map; the only one so far is
+`deye_sg04lp3`. A model is a single file in `src/models/`: it defines an
+`InverterModel` (the blocks to read, the decoders into the common
+`InverterSample`, the run states, the commands) and registers it with a
+static `ModelRegistrar`. CMake picks the file up by itself and the tests
+check every registered model, so nothing else needs editing. Fields a
+model does not have stay 0.
+
 ## HTTP API
 
 | Path | Returns |

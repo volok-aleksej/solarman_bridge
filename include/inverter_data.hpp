@@ -1,52 +1,27 @@
 #pragma once
 
-#include <array>
 #include <chrono>
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <vector>
 
-// Register map of the Deye three-phase low-voltage hybrid (SG04LP3 family,
-// device type 0x0005), read as holding registers through the logger.
+// Model-independent inverter data. A model (see inverter_model.hpp) reads
+// registers into a RegisterBank and decodes them into these structures;
+// whatever a model does not have stays 0.
 //
 // Units follow the bms_bridge convention: integers with the unit in the
 // field name (mv, ma, w, wh, dc = 0.1 °C, chz = 0.01 Hz).
 
 struct RegisterBlock {
-    uint16_t addr;
-    uint16_t count;
+    uint16_t addr;    // first register
+    uint16_t count;   // registers in a row, at most modbus::kMaxReadQuantity
 };
-
-// Device identity, read until it is known.
-inline constexpr RegisterBlock kIdentityBlock{0, 8};
-
-// Read on every poll cycle.
-inline constexpr RegisterBlock kClockBlock{62, 3};
-// Every read costs ~130 ms of logger round trip on top of the data, so the
-// blocks are as large as the Modbus limit (125) allows.
-inline constexpr RegisterBlock kLiveBlocks[] = {
-    {500, 60},    // state, daily/total energy counters, temperatures, faults
-    {586, 120},   // battery, grid, inverter output, load, PV
-};
-
-// One past the highest register any block reads: the size of RegisterBank.
-inline constexpr uint16_t kRegisterSpan = [] {
-    uint16_t end = 0;
-    auto grow = [&end](const RegisterBlock& b) {
-        if (b.addr + b.count > end) end = b.addr + b.count;
-    };
-    grow(kIdentityBlock);
-    grow(kClockBlock);
-    for (const RegisterBlock& b : kLiveBlocks) grow(b);
-    return end;
-}();
 
 constexpr int kPhases = 3;
 constexpr int kPvStrings = 2;
 
 struct InverterIdentity {
-    uint16_t    device_type = 0;   // 5 = three-phase LV hybrid
+    uint16_t    device_type = 0;   // model-specific type code
     std::string serial;
 };
 
@@ -58,7 +33,7 @@ struct InverterClock {
 struct InverterSample {
     std::chrono::system_clock::time_point ts;
 
-    uint16_t run_state = 0;        // 0 standby, 1 selfcheck, 2 normal, 3 alarm, 4 fault
+    uint16_t run_state = 0;        // model-specific; see InverterModel::state_name
 
     // PV strings
     int32_t  pv_power_w[kPvStrings]   = {};
@@ -91,8 +66,8 @@ struct InverterSample {
     int32_t  dc_temp_dc = 0;
     int32_t  ac_temp_dc = 0;
 
-    uint32_t warning_bits = 0;     // regs 553..554
-    uint64_t fault_bits   = 0;     // regs 555..558
+    uint32_t warning_bits = 0;     // model-specific bitmasks, 0 = none
+    uint64_t fault_bits   = 0;
 
     // Energy counters kept by the inverter itself (reset at its midnight)
     int64_t  day_pv_wh             = 0;
@@ -115,17 +90,11 @@ struct InverterSample {
 class RegisterBank {
 public:
     void put(uint16_t addr, const std::vector<uint16_t>& values);
-    uint16_t u16(uint16_t addr) const { return regs_[addr]; }
-    int16_t  s16(uint16_t addr) const { return static_cast<int16_t>(regs_[addr]); }
-    // Two registers, low word first (Deye convention for 32-bit counters)
-    uint32_t u32(uint16_t addr) const { return regs_[addr] | (uint32_t{regs_[addr + 1]} << 16); }
+    uint16_t u16(uint16_t addr) const { return addr < regs_.size() ? regs_[addr] : 0; }
+    int16_t  s16(uint16_t addr) const { return static_cast<int16_t>(u16(addr)); }
+    // Two registers, low word first
+    uint32_t u32(uint16_t addr) const { return u16(addr) | (uint32_t{u16(addr + 1)} << 16); }
 
 private:
-    std::array<uint16_t, kRegisterSpan> regs_{};
+    std::vector<uint16_t> regs_;
 };
-
-InverterIdentity decode_identity(const RegisterBank& bank);
-std::optional<InverterClock> decode_clock(const RegisterBank& bank);
-InverterSample decode_sample(const RegisterBank& bank);
-
-const char* run_state_name(uint16_t state);

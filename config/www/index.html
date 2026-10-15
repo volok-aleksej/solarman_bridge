@@ -59,9 +59,9 @@
             :marker-start="flowDir('load')==='out' ? 'url(#arrow)' : null"></path>
 
       <g class="flow-center" :class="{clickable: canControl()}" @click="toggleInverter()">
-        <circle cx="320" cy="180" r="34" :class="s.run_state===2 ? 'on' : 'off'"></circle>
+        <circle cx="320" cy="180" r="34" :class="live.running ? 'on' : 'off'"></circle>
         <text x="320" y="186" text-anchor="middle"
-              x-text="s.run_state===2 ? 'ON' : live.run_state_name.toUpperCase()"></text>
+              x-text="live.running ? 'ON' : live.run_state_name.toUpperCase()"></text>
       </g>
 
       <!-- Under each node: power now, current now, energy today. -->
@@ -97,7 +97,7 @@
     </svg>
 
     <div class="status-strip">
-      <span class="flag" :class="live.run_state_name==='normal' ? 'on' : 'err'"
+      <span class="flag" :class="live.running ? 'on' : 'err'"
             x-text="'State: '+live.run_state_name"></span>
       <span class="flag err" x-show="s.fault_bits"
             x-text="'Faults: 0x'+s.fault_bits.toString(16).toUpperCase()"></span>

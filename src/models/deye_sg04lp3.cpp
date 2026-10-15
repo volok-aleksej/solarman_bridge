@@ -1,24 +1,12 @@
-#include "deye_registers.hpp"
+#include "inverter_model.hpp"
 
-#include <algorithm>
-#include <cstdio>
+// Deye three-phase low-voltage hybrid, SG04LP3 family (device type 0x0005),
+// read as holding registers.
 
 namespace {
 
 // Temperatures are reported with a +100.0 °C offset, in 0.1 °C.
 constexpr int kTempOffsetDc = 1000;
-
-}  // namespace
-
-std::string InverterClock::date() const {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
-    return buf;
-}
-
-void RegisterBank::put(uint16_t addr, const std::vector<uint16_t>& values) {
-    std::copy(values.begin(), values.end(), regs_.begin() + addr);
-}
 
 InverterIdentity decode_identity(const RegisterBank& bank) {
     InverterIdentity id;
@@ -101,7 +89,7 @@ InverterSample decode_sample(const RegisterBank& b) {
     return s;
 }
 
-const char* run_state_name(uint16_t state) {
+const char* state_name(uint16_t state) {
     switch (state) {
         case 0:  return "standby";
         case 1:  return "selfcheck";
@@ -111,3 +99,35 @@ const char* run_state_name(uint16_t state) {
         default: return "unknown";
     }
 }
+
+bool running(uint16_t state) { return state == 2; }
+
+const InverterModel kModel{
+    "deye_sg04lp3",
+    "Deye three-phase LV hybrid (SUN-*K-SG04LP3)",
+    5,
+    {0, 8},   // type, serial
+    {
+        // Every read costs ~130 ms of logger round trip on top of the
+        // data, so the blocks are as large as the Modbus limit allows.
+        {62, 3},      // clock
+        {500, 60},    // state, daily/total energy counters, temperatures, faults
+        {586, 120},   // battery, grid, inverter output, load, PV
+    },
+    decode_identity,
+    decode_clock,
+    decode_sample,
+    state_name,
+    running,
+    {
+        // Register 80 (0x0050) bit 0 is the remote power switch (ha-solarman
+        // deye_p3 "On/Off Switch"). Off stops inverting and charging; the
+        // display stays alive.
+        {"power_on",  "turn the inverter on",  80, 0x0001, 0x0001},
+        {"power_off", "turn the inverter off", 80, 0x0001, 0x0000},
+    },
+};
+
+const ModelRegistrar kRegistrar{kModel};
+
+}  // namespace

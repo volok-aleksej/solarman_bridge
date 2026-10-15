@@ -12,6 +12,7 @@ struct evhttp_request;
 
 class History;
 class InverterState;
+struct InverterModel;
 
 // Dashboard + JSON API on its own libevent thread.
 //
@@ -30,7 +31,7 @@ class InverterState;
 class HttpServer : public Thread {
 public:
     HttpServer(const History& history, InverterState& state,
-               const LoggerConfig& logger_cfg,
+               const InverterModel& model, const LoggerConfig& logger_cfg,
                const HttpConfig& http_cfg, const ControlConfig& control_cfg);
     ~HttpServer() override;
 
@@ -53,6 +54,7 @@ private:
 
     const History&       history_;
     InverterState&       state_;
+    const InverterModel& model_;
     bool                 control_enabled_;
     LoggerConfig         logger_cfg_;
     uint16_t             port_;

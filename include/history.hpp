@@ -1,6 +1,6 @@
 #pragma once
 
-#include "deye_registers.hpp"
+#include "inverter_data.hpp"
 
 #include <chrono>
 #include <cstdint>

@@ -3,12 +3,13 @@
 #include <cstdint>
 #include <string>
 
-// Named commands the API may run on the inverter. Only the registers listed
-// here are ever written; there is no raw register write.
+// A named command the API may run on the inverter. Each model lists its
+// own (InverterModel::commands); only those registers are ever written,
+// there is no raw register write.
 //
 // A command owns some bits of one holding register: it reads the register,
 // replaces those bits, writes it back with function 0x10 and reads it again
-// to verify.
+// to verify. The page knows "power_on" and "power_off".
 struct InverterCommand {
     const char* name;
     const char* description;
@@ -16,10 +17,6 @@ struct InverterCommand {
     uint16_t    mask;   // bits the command owns
     uint16_t    bits;   // their new value; other bits are kept
 };
-
-extern const InverterCommand kInverterCommands[2];
-
-const InverterCommand* find_command(const std::string& name);
 
 struct CommandResult {
     bool        ok = false;

@@ -1,7 +1,7 @@
 #include "http_server.hpp"
 
 #include "history.hpp"
-#include "inverter_commands.hpp"
+#include "inverter_model.hpp"
 #include "inverter_state.hpp"
 #include "sample_columns.hpp"
 
@@ -102,9 +102,9 @@ const char* mime_for_ext(const std::string& path) {
 }  // namespace
 
 HttpServer::HttpServer(const History& history, InverterState& state,
-                       const LoggerConfig& logger_cfg,
+                       const InverterModel& model, const LoggerConfig& logger_cfg,
                        const HttpConfig& http_cfg, const ControlConfig& control_cfg)
-    : history_(history), state_(state),
+    : history_(history), state_(state), model_(model),
       control_enabled_(control_cfg.enabled), logger_cfg_(logger_cfg),
       port_(http_cfg.http_port), www_root_(http_cfg.www_root) {
     evthread_use_pthreads();
@@ -220,7 +220,8 @@ void HttpServer::handle_live(evhttp_request* req) {
     cJSON_AddNumberToObject(root.p, "poll_period_ms", logger_cfg_.poll_period_ms);
     if (snap.sample) {
         cJSON_AddStringToObject(root.p, "run_state_name",
-                                run_state_name(snap.sample->run_state));
+                                model_.state_name(snap.sample->run_state));
+        cJSON_AddBoolToObject  (root.p, "running", model_.running(snap.sample->run_state));
         cJSON_AddItemToObject(root.p, "sample", sample_to_cjson(*snap.sample, true));
     }
     if (snap.last_command) {
@@ -257,8 +258,10 @@ void HttpServer::handle_info(evhttp_request* req) {
     cJSON_AddNumberToObject(lg, "poll_period_ms", logger_cfg_.poll_period_ms);
     cJSON_AddBoolToObject  (lg, "connected",      snap.connected);
 
+    cJSON* inv = cJSON_AddObjectToObject(root.p, "inverter");
+    cJSON_AddStringToObject(inv, "model",       model_.name);
+    cJSON_AddStringToObject(inv, "description", model_.description);
     if (snap.identity) {
-        cJSON* inv = cJSON_AddObjectToObject(root.p, "inverter");
         cJSON_AddStringToObject(inv, "serial",      snap.identity->serial.c_str());
         cJSON_AddNumberToObject(inv, "device_type", snap.identity->device_type);
     }
@@ -266,7 +269,7 @@ void HttpServer::handle_info(evhttp_request* req) {
     cJSON* ctl = cJSON_AddObjectToObject(root.p, "control");
     cJSON_AddBoolToObject(ctl, "enabled", control_enabled_);
     cJSON* cmds = cJSON_AddArrayToObject(ctl, "commands");
-    for (const auto& c : kInverterCommands) {
+    for (const auto& c : model_.commands) {
         cJSON* o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "name",        c.name);
         cJSON_AddStringToObject(o, "description", c.description);
@@ -360,7 +363,7 @@ void HttpServer::handle_command(evhttp_request* req) {
     CJsonPtr json(cJSON_Parse(body.c_str()));
     const cJSON* name = cJSON_GetObjectItemCaseSensitive(json.p, "name");
     const InverterCommand* cmd =
-        cJSON_IsString(name) ? find_command(name->valuestring) : nullptr;
+        cJSON_IsString(name) ? model_.find_command(name->valuestring) : nullptr;
     if (!cmd) {
         send_json(req, HTTP_BADREQUEST, "{\"error\":\"unknown command\"}");
         return;

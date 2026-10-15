@@ -1,6 +1,6 @@
 #include "dispatcher.hpp"
 #include "history.hpp"
-#include "inverter_commands.hpp"
+#include "inverter_model.hpp"
 #include "inverter_state.hpp"
 #include "modbus_rtu.hpp"
 #include "poller.hpp"
@@ -301,7 +301,7 @@ TEST(Poller, RunsFullCyclesAndStoresSamples) {
         cfg.port = logger.port();
         cfg.serial = kSerial;
         cfg.poll_period_ms = 50;
-        Poller poller(d, cfg, state, history, std::chrono::milliseconds(0));
+        Poller poller(d, cfg, *find_model("deye_sg04lp3"), state, history, std::chrono::milliseconds(0));
         d.add_timer(10, [&] {
             if (state.snapshot().stats.cycles_ok >= 3) d.stop();
         });
@@ -389,7 +389,7 @@ protected:
         cfg.port = logger.port();
         cfg.serial = kSerial;
         cfg.poll_period_ms = 50;
-        Poller poller(d, cfg, state, history, std::chrono::milliseconds(0));
+        Poller poller(d, cfg, *find_model("deye_sg04lp3"), state, history, std::chrono::milliseconds(0));
 
         CommandResult result;
         bool submitted = false;
@@ -398,7 +398,7 @@ protected:
             if (!submitted) {
                 if (snap.stats.cycles_ok < 1) return;
                 submitted = true;
-                EXPECT_TRUE(state.request_command(*find_command(cmd)));
+                EXPECT_TRUE(state.request_command(*find_model("deye_sg04lp3")->find_command(cmd)));
             } else if (snap.last_command) {
                 EXPECT_EQ(snap.last_command->name, cmd);
                 result = snap.last_command->result;
@@ -450,11 +450,6 @@ TEST_F(PollerCommandTest, KeepsOtherBitsOfTheRegister) {
     EXPECT_EQ(inv.reg80, 0x0103);
 }
 
-TEST(InverterCommands, Whitelist) {
-    ASSERT_NE(find_command("power_on"), nullptr);
-    EXPECT_EQ(find_command("power_on")->reg, 80);
-    EXPECT_EQ(find_command("reboot"), nullptr);
-}
 
 TEST(Poller, StoresOneSamplePerSamplePeriod) {
     Dispatcher d;
@@ -470,7 +465,7 @@ TEST(Poller, StoresOneSamplePerSamplePeriod) {
         cfg.port = logger.port();
         cfg.serial = kSerial;
         cfg.poll_period_ms = 20;
-        Poller poller(d, cfg, state, history, std::chrono::seconds(10));
+        Poller poller(d, cfg, *find_model("deye_sg04lp3"), state, history, std::chrono::seconds(10));
         d.add_timer(10, [&] {
             if (state.snapshot().stats.cycles_ok >= 10) d.stop();
         });

@@ -1,8 +1,7 @@
 #pragma once
 
 #include "config.hpp"
-#include "deye_registers.hpp"
-#include "inverter_commands.hpp"
+#include "inverter_model.hpp"
 #include "timer.hpp"
 #include "v5_client.hpp"
 
@@ -27,7 +26,7 @@ class InverterState;
 class Poller {
 public:
     Poller(Dispatcher& dispatcher, const LoggerConfig& cfg,
-           InverterState& state, History& history,
+           const InverterModel& model, InverterState& state, History& history,
            std::chrono::milliseconds sample_period);
     ~Poller();
 
@@ -47,7 +46,7 @@ private:
 
     void on_tick();
     void start_cycle();
-    void on_block(Cycle& c, const RegisterBlock& b, bool ok,
+    void on_block(Cycle& c, const RegisterBlock& b, bool identity, bool ok,
                   const std::vector<uint8_t>& modbus, const std::string& error);
     void block_done(Cycle& c, std::string error);
     void finish_cycle(Cycle& c);
@@ -64,6 +63,7 @@ private:
 
     Dispatcher&               dispatcher_;
     LoggerConfig              cfg_;
+    const InverterModel&      model_;
     InverterState&            state_;
     History&                  history_;
     std::chrono::milliseconds sample_period_;

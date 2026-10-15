@@ -1,5 +1,7 @@
 #include "config.hpp"
 
+#include "inverter_model.hpp"
+
 #include <confuse.h>
 
 #include <cerrno>
@@ -20,6 +22,7 @@ int vf_range(cfg_t* cfg, cfg_opt_t* opt) {
 }
 
 cfg_opt_t logger_opts[] = {
+    CFG_STR("model",          nullptr, CFGF_NODEFAULT),
     CFG_STR("host",           nullptr, CFGF_NODEFAULT),
     CFG_INT("serial",         0,       CFGF_NODEFAULT),
     CFG_INT("port",           8899,    CFGF_NONE),
@@ -100,6 +103,13 @@ bool load_config(const std::string& path, AppConfig& out, std::string& error) {
     out.log_file  = sstr(cfg, "log_file");
 
     cfg_t* lg = cfg_getsec(cfg, "logger");
+    out.logger.model = sstr(lg, "model");
+    if (!find_model(out.logger.model)) {
+        std::string names;
+        for (const InverterModel* m : all_models())
+            names += (names.empty() ? "" : ", ") + std::string(m->name);
+        return fail("logger { model = ... } must be one of: " + names);
+    }
     out.logger.host = sstr(lg, "host");
     if (out.logger.host.empty()) return fail("logger { host = ... } is required");
     if (cfg_size(lg, "serial") == 0)
