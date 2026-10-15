@@ -102,18 +102,18 @@ void V5Client::fail(const std::string& error) {
     close_socket();
     retry_at_ = Clock::now() + reconnect_;
 
-    std::deque<Request> dropped;
-    dropped.swap(queue_);
-    if (current_.done) dropped.push_front(std::move(current_));
-    current_ = {};
-
     // The first failure of a streak loudly, the repeats quietly, so a
     // logger that is off for the night does not flood the log.
     if (failing_) spdlog::debug("v5: {}", error);
     else          spdlog::warn("v5: {}{}", error, was_up ? "" : " (connecting)");
     failing_ = true;
 
-    for (auto& r : dropped) r.done(false, {}, error);
+    // The request in flight first, then the queue. The link is closed, so
+    // a callback cannot queue anything new meanwhile.
+    if (current_.done) current_.done(false, {}, error);
+    current_ = {};
+    for (auto& r : queue_) r.done(false, {}, error);
+    queue_.clear();
 }
 
 void V5Client::connect() {
