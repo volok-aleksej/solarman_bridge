@@ -70,8 +70,6 @@ private:
     V5Client                  client_;
     Timer                     timer_;
 
-    bool link_up_        = false;
-    bool identity_known_ = false;
     // Cycles keep failing; only the first one is logged as a warning.
     bool failing_        = false;
     std::optional<Clock::time_point> last_stored_;

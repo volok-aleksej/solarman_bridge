@@ -70,12 +70,7 @@ Poller::~Poller() {
 
 void Poller::on_tick() {
     const bool up = client_.connected();
-    if (up != link_up_) {
-        link_up_ = up;
-        state_.set_connected(up);
-        if (up) identity_known_ = false;
-        else    state_.record_failure(client_.last_error());
-    }
+    state_.set_connected(up, client_.last_error());
     for (const InverterCommand* cmd : state_.take_commands()) {
         if (up) start_command(*cmd);
         else    command_done(*cmd, failure("logger not connected"));
@@ -88,7 +83,8 @@ void Poller::on_tick() {
 
 void Poller::start_cycle() {
     std::vector<RegisterBlock> blocks;
-    if (!identity_known_) blocks.push_back(kIdentityBlock);
+    // The identity does not change; it is read until it is known.
+    if (!state_.has_identity()) blocks.push_back(kIdentityBlock);
     blocks.push_back(kClockBlock);
     blocks.insert(blocks.end(), std::begin(kLiveBlocks), std::end(kLiveBlocks));
 
@@ -134,7 +130,6 @@ void Poller::publish_identity(const RegisterBank& bank) {
         spdlog::warn("poller: device type {} is not the SG04LP3 the register "
                      "map was written for; values may be wrong", id.device_type);
     state_.set_identity(std::move(id));
-    identity_known_ = true;
 }
 
 void Poller::finish_cycle(Cycle& c) {

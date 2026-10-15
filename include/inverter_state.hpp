@@ -41,10 +41,23 @@ struct InverterSnapshot {
 // The HTTP thread also leaves commands here for the poller to pick up.
 class InverterState {
 public:
-    void set_connected(bool v) {
+    // Called on every tick; acts on changes only. `error` is why the link
+    // went down.
+    void set_connected(bool v, const std::string& error) {
         std::lock_guard<std::mutex> lk(mtx_);
+        if (v == snap_.connected) return;
         snap_.connected = v;
-        if (v) ++snap_.stats.reconnects;
+        if (v) {
+            ++snap_.stats.reconnects;
+        } else {
+            snap_.stats.last_error    = error;
+            snap_.stats.last_error_at = std::chrono::system_clock::now();
+        }
+    }
+
+    bool has_identity() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return snap_.identity.has_value();
     }
 
     void set_identity(InverterIdentity id) {
