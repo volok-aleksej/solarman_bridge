@@ -106,8 +106,8 @@ DecodeResult decode_response(const uint8_t* frame, size_t len, uint8_t seq,
     if (mb_end < mb_begin + 5) {
         // The logger answers this way when the inverter did not respond on
         // its RS485 side.
-        error = "V5 frame carries no Modbus response (inverter not answering?)";
-        return DecodeResult::Error;
+        error = "no Modbus response (inverter not answering?)";
+        return DecodeResult::NoReply;
     }
     modbus_out.assign(frame + mb_begin, frame + mb_end);
     return DecodeResult::Ok;

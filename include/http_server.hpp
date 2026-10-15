@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct event_base;
 struct evhttp;
@@ -14,13 +15,25 @@ class History;
 class InverterState;
 struct InverterModel;
 
+// What the HTTP thread sees of one inverter.
+struct InverterView {
+    const InverterConfig& cfg;
+    const LoggerConfig&   logger;
+    const InverterModel&  model;
+    InverterState&        state;
+    int                   history_id;
+};
+
 // Dashboard + JSON API on its own libevent thread.
 //
-//   GET api/live                          latest sample + link status
-//   GET api/info                          logger / inverter identity, poll stats
-//   GET api/history?time_start&time_end&count   decimated samples, oldest first
-//   GET api/daily?year&month              daily energy rows of one month
-//   POST api/command {"name": "..."}      queue an inverter command (if enabled)
+//   GET api/inverters                     the configured inverters
+//   GET api/live?inverter                 latest sample + link status
+//   GET api/info?inverter                 logger / inverter identity, poll stats
+//   GET api/history?inverter&time_start&time_end&count   decimated samples
+//   GET api/daily?inverter&year&month     daily energy of one month; inverter=all sums
+//   POST api/command {"inverter", "name"} queue an inverter command (if enabled)
+//
+// `inverter` is a section title from the config; without it, the first one.
 //   anything else                         static file under www_root
 //
 // Requests only read what the poller has stored; a command is queued and
@@ -30,8 +43,7 @@ struct InverterModel;
 // proxy that mounts it under a path prefix.
 class HttpServer : public Thread {
 public:
-    HttpServer(const History& history, InverterState& state,
-               const InverterModel& model, const LoggerConfig& logger_cfg,
+    HttpServer(const History& history, std::vector<InverterView> inverters,
                const HttpConfig& http_cfg, const ControlConfig& control_cfg);
     ~HttpServer() override;
 
@@ -44,6 +56,9 @@ protected:
 
 private:
     static void on_request(struct evhttp_request* req, void* self);
+    // The inverter a request names, or nullptr after answering 404.
+    const InverterView* pick(struct evhttp_request* req, const char* name);
+    void handle_inverters(struct evhttp_request* req);
     void handle_live(struct evhttp_request* req);
     void handle_info(struct evhttp_request* req);
     void handle_history(struct evhttp_request* req);
@@ -53,10 +68,8 @@ private:
     static void send_json(struct evhttp_request* req, int code, std::string body);
 
     const History&       history_;
-    InverterState&       state_;
-    const InverterModel& model_;
+    std::vector<InverterView> inverters_;
     bool                 control_enabled_;
-    LoggerConfig         logger_cfg_;
     uint16_t             port_;
     std::string          www_root_;
 

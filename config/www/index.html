@@ -23,6 +23,17 @@
   <span class="hdr-status" x-text="status"></span>
 </header>
 
+<!-- ═══════════════════════ INVERTER BAR ═══════════════════ -->
+<!-- Only with more than one inverter. Energy can also sum them all. -->
+<div class="inv-bar" x-show="inverters.length > 1">
+  <template x-for="i in inverters" :key="i.name">
+    <button :class="{on: (tab==='energy' ? energyInverter : inverter) === i.name}"
+            @click="selectInverter(i.name)" x-text="i.name"></button>
+  </template>
+  <button x-show="tab==='energy'" :class="{on: energyInverter==='all'}"
+          @click="selectInverter('all')">All</button>
+</div>
+
 <!-- ═══════════════════════ REALTIME ═══════════════════════ -->
 <div x-show="tab==='realtime'">
 

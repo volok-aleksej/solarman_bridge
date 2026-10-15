@@ -21,9 +21,14 @@ std::string column_list() {
 // `.schema` documents the columns right in the database.
 std::string schema_sql() {
     std::string s =
+        "CREATE TABLE IF NOT EXISTS inverters (\n"
+        "    id   INTEGER PRIMARY KEY,   -- samples.inverter_id, daily_energy.inverter_id\n"
+        "    name TEXT NOT NULL UNIQUE   -- inverter section title in the config\n"
+        ");\n"
         "CREATE TABLE IF NOT EXISTS samples (\n"
-        "    id    INTEGER PRIMARY KEY AUTOINCREMENT,\n"
-        "    ts_ms INTEGER NOT NULL,  -- poll time, unix epoch ms (host clock)";
+        "    id          INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+        "    ts_ms       INTEGER NOT NULL,  -- poll time, unix epoch ms (host clock)\n"
+        "    inverter_id INTEGER NOT NULL,  -- inverters.id";
     for (const auto& c : kSampleColumns) {
         s += "\n    ";
         s += c.name;
@@ -32,32 +37,34 @@ std::string schema_sql() {
         s += c.description;
     }
     s += "\n);\n"
-         "CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts_ms);\n"
-         "-- One row per inverter calendar day: its daily counters as last seen.\n"
+         "CREATE INDEX IF NOT EXISTS idx_samples_inv_ts ON samples(inverter_id, ts_ms);\n"
+         "-- One row per inverter and its calendar day: the daily counters as last seen.\n"
          "CREATE TABLE IF NOT EXISTS daily_energy (\n"
-         "    date              TEXT PRIMARY KEY,   -- YYYY-MM-DD, inverter clock\n"
+         "    inverter_id       INTEGER NOT NULL,   -- inverters.id\n"
+         "    date              TEXT NOT NULL,      -- YYYY-MM-DD, inverter clock\n"
          "    pv_wh             INTEGER NOT NULL,   -- PV energy, Wh\n"
          "    load_wh           INTEGER NOT NULL,   -- load energy, Wh\n"
          "    grid_buy_wh       INTEGER NOT NULL,   -- bought from grid, Wh\n"
          "    grid_sell_wh      INTEGER NOT NULL,   -- sold to grid, Wh\n"
          "    batt_charge_wh    INTEGER NOT NULL,   -- battery charge, Wh\n"
          "    batt_discharge_wh INTEGER NOT NULL,   -- battery discharge, Wh\n"
-         "    updated_ms        INTEGER NOT NULL    -- last update, unix epoch ms\n"
+         "    updated_ms        INTEGER NOT NULL,   -- last update, unix epoch ms\n"
+         "    PRIMARY KEY (inverter_id, date)\n"
          ");\n";
     return s;
 }
 
 std::string insert_sql() {
-    std::string s = "INSERT INTO samples (ts_ms" + column_list() + ") VALUES (?";
+    std::string s = "INSERT INTO samples (ts_ms, inverter_id" + column_list() + ") VALUES (?,?";
     for (size_t i = 0; i < std::size(kSampleColumns); ++i) s += ",?";
     return s + ")";
 }
 
 constexpr const char* kUpsertDailySql = R"sql(
-INSERT INTO daily_energy (date, pv_wh, load_wh, grid_buy_wh, grid_sell_wh,
+INSERT INTO daily_energy (inverter_id, date, pv_wh, load_wh, grid_buy_wh, grid_sell_wh,
                           batt_charge_wh, batt_discharge_wh, updated_ms)
-VALUES (?,?,?,?,?,?,?,?)
-ON CONFLICT(date) DO UPDATE SET
+VALUES (?,?,?,?,?,?,?,?,?)
+ON CONFLICT(inverter_id, date) DO UPDATE SET
     pv_wh             = excluded.pv_wh,
     load_wh           = excluded.load_wh,
     grid_buy_wh       = excluded.grid_buy_wh,
@@ -128,7 +135,27 @@ void History::open_db() {
                  db_path_, retention_days_);
 }
 
-void History::append(const InverterSample& s, const std::string& day) {
+int History::inverter_id(const std::string& name) {
+    std::lock_guard<std::mutex> lk(wmtx_);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db_, "INSERT INTO inverters (name) VALUES (?1)"
+                            " ON CONFLICT(name) DO NOTHING", -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+
+    int id = 0;
+    sqlite3_prepare_v2(db_, "SELECT id FROM inverters WHERE name = ?1", -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(st) == SQLITE_ROW) id = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    if (id == 0)
+        throw std::runtime_error("history: cannot register inverter " + name + ": " +
+                                 sqlite3_errmsg(db_));
+    return id;
+}
+
+void History::append(int inverter_id, const InverterSample& s, const std::string& day) {
     // Old samples are dropped from here, hourly, rather than from a timer.
     const auto now = std::chrono::steady_clock::now();
     if (now >= next_purge_) {
@@ -147,6 +174,7 @@ void History::append(const InverterSample& s, const std::string& day) {
     sqlite3_reset(insert_stmt_);
     int i = 1;
     sqlite3_bind_int64(insert_stmt_, i++, ts_ms);
+    sqlite3_bind_int  (insert_stmt_, i++, inverter_id);
     for (const auto& c : kSampleColumns)
         sqlite3_bind_int64(insert_stmt_, i++, c.get(s));
     bool ok = sqlite3_step(insert_stmt_) == SQLITE_DONE;
@@ -154,6 +182,7 @@ void History::append(const InverterSample& s, const std::string& day) {
     if (ok) {
         sqlite3_reset(daily_stmt_);
         i = 1;
+        sqlite3_bind_int  (daily_stmt_, i++, inverter_id);
         sqlite3_bind_text (daily_stmt_, i++, day.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(daily_stmt_, i++, s.day_pv_wh);
         sqlite3_bind_int64(daily_stmt_, i++, s.day_load_wh);
@@ -192,7 +221,7 @@ void History::purge() {
 }
 
 std::vector<InverterSample> History::range(
-        std::chrono::system_clock::time_point from,
+        int inverter_id, std::chrono::system_clock::time_point from,
         std::chrono::system_clock::time_point to, int count) const {
     const int64_t from_ms = to_ms(from);
     const int64_t to_ms_  = to_ms(to);
@@ -205,10 +234,10 @@ std::vector<InverterSample> History::range(
         ? "SELECT " + cols + " FROM ("
           "  SELECT *, ROW_NUMBER() OVER ("
           "      PARTITION BY (ts_ms - ?1) / ?3 ORDER BY ts_ms DESC) AS rn"
-          "  FROM samples WHERE ts_ms >= ?1 AND ts_ms < ?2"
+          "  FROM samples WHERE inverter_id = ?4 AND ts_ms >= ?1 AND ts_ms < ?2"
           ") WHERE rn = 1 ORDER BY ts_ms ASC"
         : "SELECT " + cols + " FROM samples"
-          " WHERE ts_ms >= ?1 AND ts_ms < ?2 ORDER BY ts_ms ASC";
+          " WHERE inverter_id = ?4 AND ts_ms >= ?1 AND ts_ms < ?2 ORDER BY ts_ms ASC";
 
     std::lock_guard<std::mutex> lk(rmtx_);
     std::vector<InverterSample> out;
@@ -220,6 +249,7 @@ std::vector<InverterSample> History::range(
     sqlite3_bind_int64(st, 1, from_ms);
     sqlite3_bind_int64(st, 2, to_ms_);
     if (step_ms > 0) sqlite3_bind_int64(st, 3, step_ms);
+    sqlite3_bind_int(st, 4, inverter_id);
 
     while (sqlite3_step(st) == SQLITE_ROW) {
         InverterSample s;
@@ -234,7 +264,7 @@ std::vector<InverterSample> History::range(
     return out;
 }
 
-std::vector<DailyEnergy> History::daily(int year, int month) const {
+std::vector<DailyEnergy> History::daily(int inverter_id, int year, int month) const {
     char from[32], to[32];
     snprintf(from, sizeof(from), "%04d-%02d-01", year, month);
     snprintf(to,   sizeof(to),   "%04d-%02d-01", month == 12 ? year + 1 : year,
@@ -243,16 +273,20 @@ std::vector<DailyEnergy> History::daily(int year, int month) const {
     std::lock_guard<std::mutex> lk(rmtx_);
     std::vector<DailyEnergy> out;
     sqlite3_stmt* st = nullptr;
+    // inverter_id 0: every inverter, summed per day.
     if (sqlite3_prepare_v2(rdb_,
-            "SELECT date, pv_wh, load_wh, grid_buy_wh, grid_sell_wh,"
-            "       batt_charge_wh, batt_discharge_wh"
-            " FROM daily_energy WHERE date >= ? AND date < ? ORDER BY date",
+            "SELECT date, SUM(pv_wh), SUM(load_wh), SUM(grid_buy_wh), SUM(grid_sell_wh),"
+            "       SUM(batt_charge_wh), SUM(batt_discharge_wh)"
+            " FROM daily_energy WHERE date >= ?1 AND date < ?2"
+            "   AND (?3 = 0 OR inverter_id = ?3)"
+            " GROUP BY date ORDER BY date",
             -1, &st, nullptr) != SQLITE_OK) {
         spdlog::warn("history: daily prepare: {}", sqlite3_errmsg(rdb_));
         return out;
     }
     sqlite3_bind_text(st, 1, from, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(st, 2, to,   -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (st, 3, inverter_id);
     while (sqlite3_step(st) == SQLITE_ROW) {
         DailyEnergy e;
         const unsigned char* d = sqlite3_column_text(st, 0);

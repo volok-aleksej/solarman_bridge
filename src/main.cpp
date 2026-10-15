@@ -6,14 +6,19 @@
 #include "inverter_state.hpp"
 #include "logger.hpp"
 #include "poller.hpp"
+#include "v5_client.hpp"
 
 #include <spdlog/spdlog.h>
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <deque>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <string>
 
 namespace {
@@ -26,6 +31,11 @@ void print_usage(const char* prog) {
 }
 
 constexpr const char* kDefaultConfigPath = "solarman_bridge.conf";
+
+// Requests a logger's queue holds per inverter behind it: a few cycles. A
+// queue that keeps growing means the poll period is shorter than the link
+// needs, and the excess is dropped.
+constexpr size_t kQueuePerInverter = 16;
 
 }  // namespace
 
@@ -66,24 +76,48 @@ int main(int argc, char** argv) {
 
     init_logger(cfg.log_level, cfg.log_file);
 
-    spdlog::info("solarman_bridge starting; logger {}:{} serial {}, control {}",
-                 cfg.logger.host, cfg.logger.port, cfg.logger.serial,
-                 cfg.control.enabled ? "enabled" : "disabled");
+    spdlog::info("solarman_bridge starting; {} inverter(s), control {}",
+                 cfg.inverters.size(), cfg.control.enabled ? "enabled" : "disabled");
 
     // Dispatcher first: it blocks SIGINT/SIGTERM for the whole process
     // before any worker thread is spawned, so only its signalfd sees them.
-    Dispatcher    dispatcher;
-    History       history(cfg.history.db_path, cfg.history.retention_days);
-    InverterState state;
+    Dispatcher dispatcher;
+    History    history(cfg.history.db_path, cfg.history.retention_days);
 
-    // The poller runs on the dispatcher thread, so History is written only
+    // One V5 client per logger, shared by the inverters behind it; their
+    // queue has room for a few cycles of each.
+    std::map<std::string, const LoggerConfig*> loggers;
+    std::map<std::string, std::unique_ptr<V5Client>> clients;
+    for (const LoggerConfig& l : cfg.loggers) loggers[l.name] = &l;
+    for (const InverterConfig& inv : cfg.inverters) {
+        auto& c = clients[inv.logger];
+        if (c) continue;
+        const LoggerConfig& l = *loggers.at(inv.logger);
+        const size_t users = std::count_if(cfg.inverters.begin(), cfg.inverters.end(),
+            [&](const InverterConfig& i) { return i.logger == l.name; });
+        c = std::make_unique<V5Client>(dispatcher, l.host, l.port, l.serial,
+                                       std::chrono::milliseconds(l.timeout_ms),
+                                       std::chrono::milliseconds(l.reconnect_ms),
+                                       kQueuePerInverter * users);
+    }
+
+    // The pollers run on the dispatcher thread, so History is written only
     // from here; the HTTP thread reads it through its own connection.
-    // load_config() has checked that the model exists.
-    const InverterModel& model = *find_model(cfg.logger.model);
-    Poller     poller(dispatcher, cfg.logger, model, state, history,
-                      std::chrono::milliseconds(cfg.history.sample_period_ms));
-    HttpServer http_server(history, state, model, cfg.logger, cfg.http,
-                           cfg.control);
+    // load_config() has checked the models and the logger references.
+    std::deque<InverterState>        states;
+    std::vector<std::unique_ptr<Poller>> pollers;
+    std::vector<InverterView>        views;
+    for (const InverterConfig& inv : cfg.inverters) {
+        const InverterModel& model = *find_model(inv.model);
+        InverterState& state = states.emplace_back();
+        const int id = history.inverter_id(inv.name);
+        pollers.push_back(std::make_unique<Poller>(
+            dispatcher, *clients.at(inv.logger), inv, model, state, history, id,
+            std::chrono::milliseconds(cfg.history.sample_period_ms)));
+        views.push_back({inv, *loggers.at(inv.logger), model, state, id});
+    }
+
+    HttpServer http_server(history, std::move(views), cfg.http, cfg.control);
     http_server.start();
 
     dispatcher.run();

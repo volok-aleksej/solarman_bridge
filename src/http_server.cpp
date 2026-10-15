@@ -79,6 +79,7 @@ struct Query {
         const char* v = evhttp_find_header(&params, key);
         return v && v[0] ? std::atoll(v) : def;
     }
+    const char* str(const char* key) const { return evhttp_find_header(&params, key); }
 };
 
 constexpr size_t kMaxBodySize = 1024;
@@ -101,11 +102,10 @@ const char* mime_for_ext(const std::string& path) {
 
 }  // namespace
 
-HttpServer::HttpServer(const History& history, InverterState& state,
-                       const InverterModel& model, const LoggerConfig& logger_cfg,
+HttpServer::HttpServer(const History& history, std::vector<InverterView> inverters,
                        const HttpConfig& http_cfg, const ControlConfig& control_cfg)
-    : history_(history), state_(state), model_(model),
-      control_enabled_(control_cfg.enabled), logger_cfg_(logger_cfg),
+    : history_(history), inverters_(std::move(inverters)),
+      control_enabled_(control_cfg.enabled),
       port_(http_cfg.http_port), www_root_(http_cfg.www_root) {
     evthread_use_pthreads();
     base_ = event_base_new();
@@ -151,8 +151,9 @@ void HttpServer::on_request(evhttp_request* req, void* arg) {
         return;
     }
 
-    if      (path == "/api/command") self->handle_command(req);
-    else if (path == "/api/live")    self->handle_live(req);
+    if      (path == "/api/command")   self->handle_command(req);
+    else if (path == "/api/inverters") self->handle_inverters(req);
+    else if (path == "/api/live")      self->handle_live(req);
     else if (path == "/api/info")    self->handle_info(req);
     else if (path == "/api/history") self->handle_history(req);
     else if (path == "/api/daily")   self->handle_daily(req);
@@ -202,8 +203,32 @@ void HttpServer::serve_file(evhttp_request* req, const std::string& path) {
     evbuffer_free(buf);
 }
 
+const InverterView* HttpServer::pick(evhttp_request* req, const char* name) {
+    if (!name || !name[0]) return &inverters_.front();
+    for (const InverterView& v : inverters_)
+        if (v.cfg.name == name) return &v;
+    send_json(req, HTTP_NOTFOUND, "{\"error\":\"unknown inverter\"}");
+    return nullptr;
+}
+
+void HttpServer::handle_inverters(evhttp_request* req) {
+    CJsonPtr root(cJSON_CreateObject());
+    cJSON* arr = cJSON_AddArrayToObject(root.p, "inverters");
+    for (const InverterView& v : inverters_) {
+        cJSON* o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name",        v.cfg.name.c_str());
+        cJSON_AddStringToObject(o, "model",       v.model.name);
+        cJSON_AddStringToObject(o, "description", v.model.description);
+        cJSON_AddItemToArray(arr, o);
+    }
+    send_json(req, HTTP_OK, cjson_print(root.p));
+}
+
 void HttpServer::handle_live(evhttp_request* req) {
-    const InverterSnapshot snap = state_.snapshot();
+    const Query q(req);
+    const InverterView* v = pick(req, q.str("inverter"));
+    if (!v) return;
+    const InverterSnapshot snap = v->state.snapshot();
     CJsonPtr root(cJSON_CreateObject());
 
     // "online": the link is up and the last sample is recent enough
@@ -212,16 +237,17 @@ void HttpServer::handle_live(evhttp_request* req) {
     if (snap.sample)
         age_ms = epoch_ms(std::chrono::system_clock::now()) - epoch_ms(snap.sample->ts);
     const bool online = snap.connected && age_ms >= 0 &&
-                        age_ms <= 3LL * logger_cfg_.poll_period_ms;
+                        age_ms <= 3LL * v->cfg.poll_period_ms;
 
     cJSON_AddBoolToObject  (root.p, "online",    online);
     cJSON_AddBoolToObject  (root.p, "connected", snap.connected);
     cJSON_AddNumberToObject(root.p, "age_ms",    age_ms);
-    cJSON_AddNumberToObject(root.p, "poll_period_ms", logger_cfg_.poll_period_ms);
+    cJSON_AddStringToObject(root.p, "inverter",  v->cfg.name.c_str());
+    cJSON_AddNumberToObject(root.p, "poll_period_ms", v->cfg.poll_period_ms);
     if (snap.sample) {
         cJSON_AddStringToObject(root.p, "run_state_name",
-                                model_.state_name(snap.sample->run_state));
-        cJSON_AddBoolToObject  (root.p, "running", model_.running(snap.sample->run_state));
+                                v->model.state_name(snap.sample->run_state));
+        cJSON_AddBoolToObject  (root.p, "running", v->model.running(snap.sample->run_state));
         cJSON_AddItemToObject(root.p, "sample", sample_to_cjson(*snap.sample, true));
     }
     if (snap.last_command) {
@@ -247,20 +273,25 @@ void HttpServer::handle_live(evhttp_request* req) {
 }
 
 void HttpServer::handle_info(evhttp_request* req) {
-    const InverterSnapshot snap = state_.snapshot();
+    const Query q(req);
+    const InverterView* v = pick(req, q.str("inverter"));
+    if (!v) return;
+    const InverterSnapshot snap = v->state.snapshot();
     CJsonPtr root(cJSON_CreateObject());
 
     cJSON* lg = cJSON_AddObjectToObject(root.p, "logger");
-    cJSON_AddStringToObject(lg, "host",           logger_cfg_.host.c_str());
-    cJSON_AddNumberToObject(lg, "port",           logger_cfg_.port);
-    cJSON_AddNumberToObject(lg, "serial",         logger_cfg_.serial);
-    cJSON_AddNumberToObject(lg, "slave_id",       logger_cfg_.slave_id);
-    cJSON_AddNumberToObject(lg, "poll_period_ms", logger_cfg_.poll_period_ms);
-    cJSON_AddBoolToObject  (lg, "connected",      snap.connected);
+    cJSON_AddStringToObject(lg, "name",      v->logger.name.c_str());
+    cJSON_AddStringToObject(lg, "host",      v->logger.host.c_str());
+    cJSON_AddNumberToObject(lg, "port",      v->logger.port);
+    cJSON_AddNumberToObject(lg, "serial",    v->logger.serial);
+    cJSON_AddBoolToObject  (lg, "connected", snap.connected);
 
     cJSON* inv = cJSON_AddObjectToObject(root.p, "inverter");
-    cJSON_AddStringToObject(inv, "model",       model_.name);
-    cJSON_AddStringToObject(inv, "description", model_.description);
+    cJSON_AddStringToObject(inv, "name",           v->cfg.name.c_str());
+    cJSON_AddStringToObject(inv, "model",          v->model.name);
+    cJSON_AddStringToObject(inv, "description",    v->model.description);
+    cJSON_AddNumberToObject(inv, "slave_id",       v->cfg.slave_id);
+    cJSON_AddNumberToObject(inv, "poll_period_ms", v->cfg.poll_period_ms);
     if (snap.identity) {
         cJSON_AddStringToObject(inv, "serial",      snap.identity->serial.c_str());
         cJSON_AddNumberToObject(inv, "device_type", snap.identity->device_type);
@@ -269,7 +300,7 @@ void HttpServer::handle_info(evhttp_request* req) {
     cJSON* ctl = cJSON_AddObjectToObject(root.p, "control");
     cJSON_AddBoolToObject(ctl, "enabled", control_enabled_);
     cJSON* cmds = cJSON_AddArrayToObject(ctl, "commands");
-    for (const auto& c : model_.commands) {
+    for (const auto& c : v->model.commands) {
         cJSON* o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "name",        c.name);
         cJSON_AddStringToObject(o, "description", c.description);
@@ -290,6 +321,8 @@ void HttpServer::handle_info(evhttp_request* req) {
 
 void HttpServer::handle_history(evhttp_request* req) {
     const Query q(req);
+    const InverterView* v = pick(req, q.str("inverter"));
+    if (!v) return;
     const long long now_s = time(nullptr);
     const long long t_end   = q.num("time_end",   now_s);
     const long long t_start = q.num("time_start", t_end - 86400);
@@ -302,7 +335,7 @@ void HttpServer::handle_history(evhttp_request* req) {
     }
 
     const auto data = history_.range(
-        std::chrono::system_clock::from_time_t(t_start),
+        v->history_id, std::chrono::system_clock::from_time_t(t_start),
         std::chrono::system_clock::from_time_t(t_end), count);
 
     CJsonPtr root(cJSON_CreateObject());
@@ -314,6 +347,14 @@ void HttpServer::handle_history(evhttp_request* req) {
 
 void HttpServer::handle_daily(evhttp_request* req) {
     const Query q(req);
+    // inverter=all: every inverter, summed per day (history id 0).
+    const char* name = q.str("inverter");
+    int history_id = 0;
+    if (!name || std::string(name) != "all") {
+        const InverterView* v = pick(req, name);
+        if (!v) return;
+        history_id = v->history_id;
+    }
     const time_t now_t = time(nullptr);
     tm lt{};
     localtime_r(&now_t, &lt);
@@ -328,7 +369,7 @@ void HttpServer::handle_daily(evhttp_request* req) {
     cJSON_AddNumberToObject(root.p, "year",  year);
     cJSON_AddNumberToObject(root.p, "month", month);
     cJSON* arr = cJSON_AddArrayToObject(root.p, "data");
-    for (const auto& e : history_.daily(year, month)) {
+    for (const auto& e : history_.daily(history_id, year, month)) {
         cJSON* o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "date",              e.date.c_str());
         cJSON_AddNumberToObject(o, "pv_wh",             e.pv_wh);
@@ -361,9 +402,12 @@ void HttpServer::handle_command(evhttp_request* req) {
     std::string body(evbuffer_get_length(in), '\0');
     evbuffer_copyout(in, body.data(), body.size());
     CJsonPtr json(cJSON_Parse(body.c_str()));
+    const cJSON* inv  = cJSON_GetObjectItemCaseSensitive(json.p, "inverter");
+    const InverterView* v = pick(req, cJSON_IsString(inv) ? inv->valuestring : nullptr);
+    if (!v) return;
     const cJSON* name = cJSON_GetObjectItemCaseSensitive(json.p, "name");
     const InverterCommand* cmd =
-        cJSON_IsString(name) ? model_.find_command(name->valuestring) : nullptr;
+        cJSON_IsString(name) ? v->model.find_command(name->valuestring) : nullptr;
     if (!cmd) {
         send_json(req, HTTP_BADREQUEST, "{\"error\":\"unknown command\"}");
         return;
@@ -372,9 +416,10 @@ void HttpServer::handle_command(evhttp_request* req) {
     char* peer = nullptr;
     uint16_t peer_port = 0;
     evhttp_connection_get_peer(evhttp_request_get_connection(req), &peer, &peer_port);
-    spdlog::info("http: command {} from {}", cmd->name, peer ? peer : "?");
+    spdlog::info("http: command {} for {} from {}", cmd->name, v->cfg.name,
+                 peer ? peer : "?");
 
-    if (!state_.request_command(*cmd)) {
+    if (!v->state.request_command(*cmd)) {
         send_json(req, HTTP_SERVUNAVAIL, "{\"error\":\"too many pending commands\"}");
         return;
     }

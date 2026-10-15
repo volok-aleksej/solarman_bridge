@@ -43,9 +43,10 @@ std::vector<uint8_t> encode_request(uint8_t seq, uint32_t logger_serial,
 size_t frame_length(const std::vector<uint8_t>& buf, size_t& junk);
 
 enum class DecodeResult {
-    Ok,      // `modbus_out` holds the embedded Modbus RTU response
-    Ignore,  // valid but not ours (counter frame, stale sequence number)
-    Error,   // malformed; `error` says why
+    Ok,       // `modbus_out` holds the embedded Modbus RTU response
+    NoReply,  // ours, but the inverter behind the logger did not answer
+    Ignore,   // valid but not ours (counter frame, stale sequence number)
+    Error,    // malformed; `error` says why
 };
 
 DecodeResult decode_response(const uint8_t* frame, size_t len, uint8_t seq,

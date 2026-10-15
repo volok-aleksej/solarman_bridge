@@ -45,8 +45,8 @@ std::vector<uint8_t> v5_response(uint16_t control, uint8_t seq,
     return f;
 }
 
-std::vector<uint8_t> modbus_regs(const std::vector<uint16_t>& regs) {
-    std::vector<uint8_t> f = {1, modbus::kReadHoldingRegisters,
+std::vector<uint8_t> modbus_regs(const std::vector<uint16_t>& regs, uint8_t slave = 1) {
+    std::vector<uint8_t> f = {slave, modbus::kReadHoldingRegisters,
                               uint8_t(regs.size() * 2)};
     for (uint16_t r : regs) { f.push_back(r >> 8); f.push_back(r & 0xFF); }
     const uint16_t crc = modbus::crc16(f.data(), f.size());
@@ -184,14 +184,23 @@ TEST(V5Client, SkipsCounterAndStaleFramesThenReturnsReply) {
     EXPECT_TRUE(h.c->connected());
 }
 
-TEST(V5Client, TimesOutAndCloses) {
+TEST(V5Client, TimeoutFailsTheRequestThreeInARowDropTheLink) {
     Harness h;
     FakeLogger logger(h.d, [](int, const std::vector<uint8_t>&) {});  // never answers
     h.start(logger.port(), 100);
 
-    const Result r = h.round_trip(kReadClock);
-    EXPECT_FALSE(r.ok);
-    EXPECT_EQ(r.error, "receive: timeout");
+    const Result first = h.round_trip(kReadClock);
+    EXPECT_FALSE(first.ok);
+    EXPECT_EQ(first.error, "receive: timeout");
+    EXPECT_TRUE(h.c->connected());   // one silent request is not a dead link
+
+    std::vector<std::string> errors;
+    for (int i = 0; i < 2; ++i)
+        ASSERT_TRUE(h.c->submit(kReadClock, [&](bool, std::vector<uint8_t>, const std::string& e) {
+            errors.push_back(e);
+        }, false));
+    h.run_until([&] { return errors.size() == 2; });
+    EXPECT_EQ(errors[1], "receive: timeout");
     EXPECT_FALSE(h.c->connected());
 }
 
@@ -225,6 +234,20 @@ TEST(V5Client, RefusesRequestsWithoutALink) {
     EXPECT_FALSE(h.c->connected());
     EXPECT_FALSE(h.c->last_error().empty());
     EXPECT_FALSE(h.c->submit(kReadClock, never, false));
+}
+
+TEST(V5Client, MissingModbusReplyFailsOnlyThatRequest) {
+    Harness h;
+    FakeLogger logger(h.d, [&](int fd, const std::vector<uint8_t>& req) {
+        // What a logger sends when the inverter on its RS485 stays silent.
+        send_bytes(fd, v5_response(v5::kControlResponse, req[5], {}));
+    });
+    h.start(logger.port());
+
+    const Result r = h.round_trip(kReadClock);
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("no Modbus response"), std::string::npos) << r.error;
+    EXPECT_TRUE(h.c->connected());
 }
 
 TEST(V5Client, LinkLossFailsEveryQueuedRequest) {
@@ -296,22 +319,23 @@ TEST(Poller, RunsFullCyclesAndStoresSamples) {
     InverterState state;
     {
         History history(db, 30);
-        LoggerConfig cfg;
-        cfg.host = "127.0.0.1";
-        cfg.port = logger.port();
-        cfg.serial = kSerial;
+        V5Client client(d, "127.0.0.1", logger.port(), kSerial,
+                        std::chrono::milliseconds(1000), std::chrono::milliseconds(50), 16);
+        InverterConfig cfg;
+        cfg.name = "main";
         cfg.poll_period_ms = 50;
-        Poller poller(d, cfg, *find_model("deye_sg04lp3"), state, history, std::chrono::milliseconds(0));
+        Poller poller(d, client, cfg, *find_model("deye_sg04lp3"), state, history,
+                      history.inverter_id("main"), std::chrono::milliseconds(0));
         d.add_timer(10, [&] {
             if (state.snapshot().stats.cycles_ok >= 3) d.stop();
         });
         d.run();
 
         const auto now  = std::chrono::system_clock::now();
-        const auto rows = history.range(now - std::chrono::minutes(1),
+        const auto rows = history.range(history.inverter_id("main"), now - std::chrono::minutes(1),
                                         now + std::chrono::minutes(1), 0);
         EXPECT_GE(rows.size(), 3u);
-        const auto days = history.daily(2026, 10);
+        const auto days = history.daily(history.inverter_id("main"), 2026, 10);
         ASSERT_EQ(days.size(), 1u);
         EXPECT_EQ(days[0].date, "2026-10-14");  // from the inverter clock
     }
@@ -384,12 +408,13 @@ protected:
         });
         InverterState state;
         History history(db_, 30);
-        LoggerConfig cfg;
-        cfg.host = "127.0.0.1";
-        cfg.port = logger.port();
-        cfg.serial = kSerial;
+        V5Client client(d, "127.0.0.1", logger.port(), kSerial,
+                        std::chrono::milliseconds(1000), std::chrono::milliseconds(50), 16);
+        InverterConfig cfg;
+        cfg.name = "main";
         cfg.poll_period_ms = 50;
-        Poller poller(d, cfg, *find_model("deye_sg04lp3"), state, history, std::chrono::milliseconds(0));
+        Poller poller(d, client, cfg, *find_model("deye_sg04lp3"), state, history,
+                      history.inverter_id("main"), std::chrono::milliseconds(0));
 
         CommandResult result;
         bool submitted = false;
@@ -460,21 +485,60 @@ TEST(Poller, StoresOneSamplePerSamplePeriod) {
     InverterState state;
     {
         History history(db, 30);
-        LoggerConfig cfg;
-        cfg.host = "127.0.0.1";
-        cfg.port = logger.port();
-        cfg.serial = kSerial;
+        V5Client client(d, "127.0.0.1", logger.port(), kSerial,
+                        std::chrono::milliseconds(1000), std::chrono::milliseconds(50), 16);
+        InverterConfig cfg;
+        cfg.name = "main";
         cfg.poll_period_ms = 20;
-        Poller poller(d, cfg, *find_model("deye_sg04lp3"), state, history, std::chrono::seconds(10));
+        Poller poller(d, client, cfg, *find_model("deye_sg04lp3"), state, history,
+                      history.inverter_id("main"), std::chrono::seconds(10));
         d.add_timer(10, [&] {
             if (state.snapshot().stats.cycles_ok >= 10) d.stop();
         });
         d.run();
 
         const auto now = std::chrono::system_clock::now();
-        EXPECT_EQ(history.range(now - std::chrono::minutes(1),
+        EXPECT_EQ(history.range(history.inverter_id("main"), now - std::chrono::minutes(1),
                                 now + std::chrono::minutes(1), 0).size(), 1u);
     }
     for (const char* sfx : {"", "-wal", "-shm"}) std::remove((db + sfx).c_str());
     EXPECT_GE(state.snapshot().stats.cycles_ok, 10u);
+}
+
+TEST(Poller, InvertersOnOneLoggerShareItsConnection) {
+    Dispatcher d;
+    FakeLogger logger(d, [&](int fd, const std::vector<uint8_t>& req) {
+        const uint8_t  slave = req[26];
+        const uint16_t addr  = (req[28] << 8) | req[29];
+        const uint16_t qty   = (req[30] << 8) | req[31];
+        std::vector<uint16_t> regs(qty, 0);
+        if (addr == 0)   regs[0] = 5;
+        if (addr == 586) regs[588 - 586] = 10 * slave;   // SOC tells them apart
+        send_bytes(fd, v5_response(v5::kControlResponse, req[5], modbus_regs(regs, slave)));
+    });
+
+    const std::string db = "/tmp/solarman_shared_test_" + std::to_string(getpid()) + ".sqlite3";
+    InverterState s1, s2;
+    {
+        History history(db, 30);
+        V5Client client(d, "127.0.0.1", logger.port(), kSerial,
+                        std::chrono::milliseconds(1000), std::chrono::milliseconds(50), 32);
+        InverterConfig c1, c2;
+        c1.name = "one"; c1.slave_id = 1; c1.poll_period_ms = 30;
+        c2.name = "two"; c2.slave_id = 2; c2.poll_period_ms = 30;
+        const InverterModel& m = *find_model("deye_sg04lp3");
+        Poller p1(d, client, c1, m, s1, history, history.inverter_id("one"), std::chrono::milliseconds(0));
+        Poller p2(d, client, c2, m, s2, history, history.inverter_id("two"), std::chrono::milliseconds(0));
+        d.add_timer(10, [&] {
+            if (s1.snapshot().stats.cycles_ok >= 3 && s2.snapshot().stats.cycles_ok >= 3) d.stop();
+        });
+        d.run();
+    }
+    for (const char* sfx : {"", "-wal", "-shm"}) std::remove((db + sfx).c_str());
+
+    EXPECT_EQ(s1.snapshot().sample->batt_soc_pct, 10);
+    EXPECT_EQ(s2.snapshot().sample->batt_soc_pct, 20);
+    EXPECT_EQ(s1.snapshot().stats.cycles_failed, 0u);
+    EXPECT_EQ(s2.snapshot().stats.cycles_failed, 0u);
+    EXPECT_EQ(logger.accepted(), 1);
 }

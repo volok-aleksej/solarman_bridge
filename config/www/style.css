@@ -441,12 +441,13 @@ canvas { display: block; width: 100%; }
 .fn-value.neg     { fill: #cf222e; }
 .fn-sub           { font-size: 12px; fill: #57606a; }
 
-.rt-tabs {
+.inv-bar, .rt-tabs {
   display: flex;
   gap: 4px;
   padding: 10px 16px;
 }
-.rt-tabs button {
+.inv-bar { background: #ffffff; border-bottom: 1px solid #d0d7de; }
+.inv-bar button, .rt-tabs button {
   background: #f6f8fa;
   border: 1px solid #d0d7de;
   color: #1f2328;
@@ -455,5 +456,5 @@ canvas { display: block; width: 100%; }
   border-radius: 4px;
   font: inherit;
 }
-.rt-tabs button:hover { background: #eaeef2; }
-.rt-tabs button.on    { background: #dbeafe; border-color: #0969da; color: #0969da; font-weight: bold; }
+.inv-bar button:hover, .rt-tabs button:hover { background: #eaeef2; }
+.inv-bar button.on, .rt-tabs button.on { background: #dbeafe; border-color: #0969da; color: #0969da; font-weight: bold; }

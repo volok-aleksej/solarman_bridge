@@ -11,10 +11,6 @@
 
 namespace {
 
-// Room for a few cycles; a queue that keeps growing means the poll period
-// is shorter than the link needs, and the excess is dropped.
-constexpr size_t kMaxQueue = 16;
-
 // Fallback day key when the inverter clock cannot be decoded.
 std::string local_date() {
     const time_t now = time(nullptr);
@@ -45,16 +41,13 @@ bool read_one(const std::vector<uint8_t>& modbus, uint8_t slave, uint16_t& value
 
 }  // namespace
 
-Poller::Poller(Dispatcher& dispatcher, const LoggerConfig& cfg,
+Poller::Poller(Dispatcher& dispatcher, V5Client& client, const InverterConfig& cfg,
                const InverterModel& model, InverterState& state, History& history,
-               std::chrono::milliseconds sample_period)
+               int history_id, std::chrono::milliseconds sample_period)
     : dispatcher_(dispatcher), cfg_(cfg), model_(model), state_(state), history_(history),
-      sample_period_(sample_period),
-      client_(dispatcher, cfg.host, cfg.port, cfg.serial,
-              std::chrono::milliseconds(cfg.timeout_ms),
-              std::chrono::milliseconds(cfg.reconnect_ms), kMaxQueue) {
-    spdlog::info("poller: {} via logger {}:{} serial {} slave {}, every {} ms",
-                 model_.name, cfg_.host, cfg_.port, cfg_.serial, cfg_.slave_id,
+      history_id_(history_id), sample_period_(sample_period), client_(client) {
+    spdlog::info("poller {}: {} via logger {}, slave {}, every {} ms",
+                 cfg_.name, model_.name, cfg_.logger, cfg_.slave_id,
                  cfg_.poll_period_ms);
     dispatcher_.watch(timer_.fd(), [this] {
         timer_.consume();
@@ -122,11 +115,11 @@ void Poller::block_done(Cycle& c, std::string error) {
 
 void Poller::publish_identity(const RegisterBank& bank) {
     InverterIdentity id = model_.decode_identity(bank);
-    spdlog::info("poller: inverter serial {} device type {}",
-                 id.serial, id.device_type);
+    spdlog::info("poller {}: inverter serial {} device type {}",
+                 cfg_.name, id.serial, id.device_type);
     if (model_.device_type && id.device_type != model_.device_type)
-        spdlog::warn("poller: device type {}, but model {} expects {}; values "
-                     "may be wrong", id.device_type, model_.name, model_.device_type);
+        spdlog::warn("poller {}: device type {}, but model {} expects {}; values "
+                     "may be wrong", cfg_.name, id.device_type, model_.name, model_.device_type);
     state_.set_identity(std::move(id));
 }
 
@@ -134,22 +127,22 @@ void Poller::finish_cycle(Cycle& c) {
     if (!c.error.empty()) {
         // A lost link is logged by the client; only cycle errors here.
         if (client_.connected()) {
-            if (failing_) spdlog::debug("poller: {}", c.error);
-            else          spdlog::warn("poller: {}", c.error);
+            if (failing_) spdlog::debug("poller {}: {}", cfg_.name, c.error);
+            else          spdlog::warn("poller {}: {}", cfg_.name, c.error);
             failing_ = true;
         }
         state_.record_failure(c.error);
         return;
     }
-    if (failing_) spdlog::info("poller: inverter answering again");
+    if (failing_) spdlog::info("poller {}: inverter answering again", cfg_.name);
     failing_ = false;
 
     InverterSample sample = model_.decode_sample(c.bank);
     std::optional<InverterClock> clock = model_.decode_clock(c.bank);
     const int64_t cycle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  Clock::now() - c.start).count();
-    spdlog::trace("poller: pv={}W batt={}W soc={}% grid={}W load={}W ({} ms)",
-                  sample.pv_power_w[0] + sample.pv_power_w[1],
+    spdlog::trace("poller {}: pv={}W batt={}W soc={}% grid={}W load={}W ({} ms)",
+                  cfg_.name, sample.pv_power_w[0] + sample.pv_power_w[1],
                   sample.batt_power_w, sample.batt_soc_pct,
                   sample.grid_power_total_w, sample.load_power_total_w,
                   cycle_ms);
@@ -158,7 +151,7 @@ void Poller::finish_cycle(Cycle& c) {
     // sample to the next cycle.
     const auto slack = std::chrono::milliseconds(cfg_.poll_period_ms / 2);
     if (!last_stored_ || c.start - *last_stored_ >= sample_period_ - slack) {
-        history_.append(sample, clock ? clock->date() : local_date());
+        history_.append(history_id_, sample, clock ? clock->date() : local_date());
         last_stored_ = c.start;
     }
     state_.apply_cycle(std::move(sample), clock, cycle_ms);
@@ -191,8 +184,8 @@ void Poller::on_command_read(const InverterCommand& cmd, bool ok,
             r.ok    = true;
             r.after = r.before;
         } else {
-            spdlog::warn("control: {}: writing reg {} 0x{:04x} -> 0x{:04x}",
-                         cmd.name, cmd.reg, r.before, target);
+            spdlog::warn("control {}: {}: writing reg {} 0x{:04x} -> 0x{:04x}",
+                         cfg_.name, cmd.name, cmd.reg, r.before, target);
             const bool queued = client_.submit(
                 modbus::build_write_multiple(cfg_.slave_id, cmd.reg, {target}),
                 [this, &cmd, r](bool ok2, std::vector<uint8_t> mb, const std::string& e) {
@@ -245,8 +238,8 @@ void Poller::on_command_verify(const InverterCommand& cmd, CommandResult r, bool
 
 void Poller::command_done(const InverterCommand& cmd, CommandResult r) {
     if (r.ok)
-        spdlog::info("control: {}: done, reg {} = 0x{:04x}", cmd.name, cmd.reg, r.after);
+        spdlog::info("control {}: {}: done, reg {} = 0x{:04x}", cfg_.name, cmd.name, cmd.reg, r.after);
     else
-        spdlog::warn("control: {}: failed: {}", cmd.name, r.error);
+        spdlog::warn("control {}: {}: failed: {}", cfg_.name, cmd.name, r.error);
     state_.set_command(cmd.name, std::move(r));
 }

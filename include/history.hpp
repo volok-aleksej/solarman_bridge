@@ -31,21 +31,28 @@ public:
     History(const History&) = delete;
     History& operator=(const History&) = delete;
 
+    // Id of the inverter called `name`, registered on first use. Writer
+    // side; call it before the pollers start.
+    int inverter_id(const std::string& name);
+
     // Store a sample and refresh the daily_energy row for `day` from its
-    // daily counters; purges old samples once an hour. Called by the poller
-    // (dispatcher thread).
-    void append(const InverterSample& s, const std::string& day);
+    // daily counters; purges old samples once an hour. Called by the
+    // pollers (dispatcher thread).
+    void append(int inverter_id, const InverterSample& s, const std::string& day);
 
     // Drop raw samples older than the retention window.
     void purge();
 
     // Samples in [from, to), oldest first. With count > 0 the window is cut
     // into `count` equal buckets and the newest sample of each is returned.
-    std::vector<InverterSample> range(std::chrono::system_clock::time_point from,
+    std::vector<InverterSample> range(int inverter_id,
+                                      std::chrono::system_clock::time_point from,
                                       std::chrono::system_clock::time_point to,
                                       int count) const;
 
-    std::vector<DailyEnergy> daily(int year, int month) const;
+    // Daily energy of one inverter, or with inverter_id 0 of all of them
+    // summed per day.
+    std::vector<DailyEnergy> daily(int inverter_id, int year, int month) const;
 
 private:
     void open_db();

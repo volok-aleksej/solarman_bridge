@@ -7,7 +7,8 @@ const API = {
   info:    'api/info',
   history: 'api/history',
   daily:   'api/daily',
-  command: 'api/command',
+  command:   'api/command',
+  inverters: 'api/inverters',
 };
 
 const LIVE_POLL_MS = 1000;
@@ -175,7 +176,40 @@ function inverter() {
     cmdBusy:      false,
     cmdStatus:    '',
 
+    inverters:      [],   // from api/inverters
+    inverter:       '',   // selected name; '' until the list is loaded
+    energyInverter: '',   // Energy may also show 'all'
+
     get s() { return this.live.sample || null; },
+
+    // Query parameter for the selected inverter.
+    invQ(name) {
+      const n = name === undefined ? this.inverter : name;
+      return n ? 'inverter=' + encodeURIComponent(n) : '';
+    },
+
+    selectInverter(name) {
+      if (name === 'all') { this.energyInverter = 'all'; this.loadEnergy(); return; }
+      this.inverter       = name;
+      this.energyInverter = name;
+      this.live      = {};
+      this.info      = null;
+      this.cmdStatus = '';
+      this.loadInfo();
+      this.openTab(this.tab);
+    },
+
+    async loadInverters() {
+      try {
+        const r = await fetch(API.inverters);
+        if (!r.ok) return;
+        this.inverters = (await r.json()).inverters;
+        if (!this.inverter && this.inverters.length) {
+          this.inverter       = this.inverters[0].name;
+          this.energyInverter = this.inverter;
+        }
+      } catch (_) {}
+    },
 
     openTab(t) {
       this.tab = t;
@@ -194,8 +228,11 @@ function inverter() {
       window.addEventListener('hashchange', fromHash);
       this.$watch('tab', t => { if (location.hash !== '#' + t) location.hash = t; });
 
+      this.loadInverters().then(() => {
+        this.loadInfo();   // the centre button needs to know if control is on
+        this.openTab(this.tab);
+      });
       this._startLivePolling();
-      this.loadInfo();   // the centre button needs to know if control is on
       this._histLastLoad = 0;
       // Refresh the open History tab at roughly the resolution it shows.
       setInterval(() => {
@@ -315,12 +352,16 @@ function inverter() {
       const poll = async () => {
         if (busy) return;   // a slow answer must not stack requests up
         busy = true;
+        const name = this.inverter;
         try {
-          const r = await fetch(API.live);
+          const r = await fetch(`${API.live}?${this.invQ()}`);
           if (!r.ok) throw new Error(r.status);
-          this.live = await r.json();
-          this.linkStatus = this.live.online ? ''
-            : (this.live.connected ? 'stale data' : 'logger offline');
+          const j = await r.json();
+          if (name === this.inverter) {   // not switched meanwhile
+            this.live = j;
+            this.linkStatus = j.online ? ''
+              : (j.connected ? 'stale data' : 'logger offline');
+          }
         } catch (e) {
           this.linkStatus = 'error: ' + e.message;
         }
@@ -358,7 +399,7 @@ function inverter() {
       try {
         const t1 = Math.floor(Date.now() / 1000);
         const t0 = t1 - this.histHours * 3600;
-        const r = await fetch(`${API.history}?time_start=${t0}&time_end=${t1}&count=600`);
+        const r = await fetch(`${API.history}?${this.invQ()}&time_start=${t0}&time_end=${t1}&count=600`);
         if (!r.ok) throw new Error(r.status);
         const data = (await r.json()).data;
 
@@ -494,7 +535,7 @@ function inverter() {
     async loadEnergy() {
       this.energyStatus = 'loading…';
       try {
-        const r = await fetch(`${API.daily}?year=${this.energyYear}&month=${this.energyMonth}`);
+        const r = await fetch(`${API.daily}?${this.invQ(this.energyInverter)}&year=${this.energyYear}&month=${this.energyMonth}`);
         if (!r.ok) throw new Error(r.status);
         const j = await r.json();
 
@@ -553,8 +594,9 @@ function inverter() {
 
     async loadInfo() {
       try {
-        const r = await fetch(API.info);
-        if (r.ok) this.info = await r.json();
+        const name = this.inverter;
+        const r = await fetch(`${API.info}?${this.invQ()}`);
+        if (r.ok && name === this.inverter) this.info = await r.json();
       } catch (_) {}
     },
 
@@ -574,7 +616,7 @@ function inverter() {
         const r = await fetch(API.command, {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ name: c.name }),
+          body:    JSON.stringify({ inverter: this.inverter, name: c.name }),
         });
         if (r.status !== 202) {
           this.cmdStatus = 'failed: ' + (await r.json()).error;

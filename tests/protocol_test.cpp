@@ -124,7 +124,7 @@ TEST(SolarmanV5, WrongLoggerSerialIsError) {
               v5::DecodeResult::Error);
 }
 
-TEST(SolarmanV5, EmptyModbusPayloadIsError) {
+TEST(SolarmanV5, EmptyModbusPayloadIsNoReply) {
     // What the logger sends when the inverter does not answer on RS485.
     std::vector<uint8_t> f(kResponse.begin(), kResponse.begin() + 25);
     f[1] = 14;
@@ -135,7 +135,7 @@ TEST(SolarmanV5, EmptyModbusPayloadIsError) {
     std::vector<uint8_t> mb;
     std::string err;
     EXPECT_EQ(v5::decode_response(f.data(), f.size(), kSeq, kLoggerSerial, mb, err),
-              v5::DecodeResult::Error);
+              v5::DecodeResult::NoReply);
 }
 
 TEST(SolarmanV5, FrameLengthSplitsStream) {
