@@ -142,13 +142,24 @@ function makeLineChart(id, title, yfmt) {
   });
 }
 
+// Labels of the lines the user has hidden by clicking the legend. Chart.js
+// keeps that per dataset object, so it is carried over by label whenever
+// the datasets are rebuilt.
+function hiddenLabels(chart) {
+  return new Set(chart.data.datasets
+    .filter((_, i) => !chart.isDatasetVisible(i))
+    .map(d => d.label));
+}
+
 // series = [{ label, color, fn }]; fn maps a sample to its y value.
 function setSeries(chart, data, series) {
   if (!chart) return;
+  const hidden = hiddenLabels(chart);
   chart.data.datasets = series.map(s => ({
     label:           s.label,
     borderColor:     s.color,
     backgroundColor: s.color,
+    hidden:          hidden.has(s.label),
     data:            data.map(d => ({ x: d.ts, y: s.fn(d) })),
   }));
   chart.update('none');
@@ -490,8 +501,9 @@ function inverter() {
     drawEnergyBars() {
       if (!ENERGY_CHART) return;
       ENERGY_CHART.data.labels = ENERGY_ROWS.map((_, i) => String(i + 1));
+      const hidden = hiddenLabels(ENERGY_CHART);
       ENERGY_CHART.data.datasets = ENERGY_BARS[this.energyTab].map(([label, key, color]) => ({
-        label, backgroundColor: color, borderColor: color,
+        label, backgroundColor: color, borderColor: color, hidden: hidden.has(label),
         data: ENERGY_ROWS.map(e => e ? e[key] / 1000 : 0),
       }));
       ENERGY_CHART.update('none');
