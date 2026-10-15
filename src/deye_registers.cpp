@@ -1,7 +1,7 @@
 #include "deye_registers.hpp"
 
+#include <algorithm>
 #include <cstdio>
-#include <stdexcept>
 
 namespace {
 
@@ -17,23 +17,7 @@ std::string InverterClock::date() const {
 }
 
 void RegisterBank::put(uint16_t addr, const std::vector<uint16_t>& values) {
-    for (size_t i = 0; i < values.size(); ++i)
-        regs_[addr + i] = values[i];
-}
-
-uint16_t RegisterBank::u16(uint16_t addr) const {
-    auto it = regs_.find(addr);
-    if (it == regs_.end())
-        throw std::out_of_range("register " + std::to_string(addr) + " not read");
-    return it->second;
-}
-
-int16_t RegisterBank::s16(uint16_t addr) const {
-    return static_cast<int16_t>(u16(addr));
-}
-
-uint32_t RegisterBank::u32(uint16_t addr) const {
-    return u16(addr) | (uint32_t{u16(addr + 1)} << 16);
+    std::copy(values.begin(), values.end(), regs_.begin() + addr);
 }
 
 InverterIdentity decode_identity(const RegisterBank& bank) {

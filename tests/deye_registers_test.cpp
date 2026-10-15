@@ -1,7 +1,9 @@
 #include "deye_registers.hpp"
+#include "sample_columns.hpp"
 
 #include <gtest/gtest.h>
 
+#include <iterator>
 #include <vector>
 
 namespace {
@@ -105,7 +107,24 @@ TEST(DeyeRegisters, SignedValues) {
     EXPECT_EQ(s.batt_temp_dc, -100);
 }
 
-TEST(DeyeRegisters, MissingRegisterThrows) {
-    RegisterBank b;
-    EXPECT_THROW(decode_sample(b), std::out_of_range);
+// Every register a decoder uses must lie in a block that is read: with
+// the same values, a bank filled only through the blocks must decode
+// exactly like a bank with every register set.
+TEST(DeyeRegisters, DecodersUseOnlyRegistersThatAreRead) {
+    std::vector<uint16_t> all(kRegisterSpan);
+    for (size_t i = 0; i < all.size(); ++i) all[i] = 0x1000 + i * 7;
+
+    RegisterBank full, blocks;
+    full.put(0, all);
+    std::vector<RegisterBlock> read = {kIdentityBlock, kClockBlock};
+    read.insert(read.end(), std::begin(kLiveBlocks), std::end(kLiveBlocks));
+    for (const RegisterBlock& b : read)
+        blocks.put(b.addr, {all.begin() + b.addr, all.begin() + b.addr + b.count});
+
+    const InverterSample a = decode_sample(full), b = decode_sample(blocks);
+    for (const auto& c : kSampleColumns)  EXPECT_EQ(c.get(a), c.get(b)) << c.name;
+    for (const auto& c : kCounterColumns) EXPECT_EQ(c.get(a), c.get(b)) << c.name;
+    EXPECT_EQ(decode_identity(full).serial, decode_identity(blocks).serial);
+    EXPECT_EQ(decode_identity(full).device_type, decode_identity(blocks).device_type);
+    EXPECT_EQ(decode_clock(full).has_value(), decode_clock(blocks).has_value());
 }

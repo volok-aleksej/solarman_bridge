@@ -1,10 +1,10 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 // Register map of the Deye three-phase low-voltage hybrid (SG04LP3 family,
@@ -18,7 +18,7 @@ struct RegisterBlock {
     uint16_t count;
 };
 
-// Device identity, read once after (re)connecting.
+// Device identity, read until it is known.
 inline constexpr RegisterBlock kIdentityBlock{0, 8};
 
 // Read on every poll cycle.
@@ -29,6 +29,18 @@ inline constexpr RegisterBlock kLiveBlocks[] = {
     {500, 60},    // state, daily/total energy counters, temperatures, faults
     {586, 120},   // battery, grid, inverter output, load, PV
 };
+
+// One past the highest register any block reads: the size of RegisterBank.
+inline constexpr uint16_t kRegisterSpan = [] {
+    uint16_t end = 0;
+    auto grow = [&end](const RegisterBlock& b) {
+        if (b.addr + b.count > end) end = b.addr + b.count;
+    };
+    grow(kIdentityBlock);
+    grow(kClockBlock);
+    for (const RegisterBlock& b : kLiveBlocks) grow(b);
+    return end;
+}();
 
 constexpr int kPhases = 3;
 constexpr int kPvStrings = 2;
@@ -98,18 +110,18 @@ struct InverterSample {
     int64_t  total_batt_discharge_wh = 0;
 };
 
-// Sparse address → value view over the blocks read in one cycle.
+// The blocks read in one cycle, indexed by register number. A register no
+// block covers reads as 0.
 class RegisterBank {
 public:
     void put(uint16_t addr, const std::vector<uint16_t>& values);
-    bool has(uint16_t addr) const { return regs_.count(addr) != 0; }
-    uint16_t u16(uint16_t addr) const;
-    int16_t  s16(uint16_t addr) const;
+    uint16_t u16(uint16_t addr) const { return regs_[addr]; }
+    int16_t  s16(uint16_t addr) const { return static_cast<int16_t>(regs_[addr]); }
     // Two registers, low word first (Deye convention for 32-bit counters)
-    uint32_t u32(uint16_t addr) const;
+    uint32_t u32(uint16_t addr) const { return regs_[addr] | (uint32_t{regs_[addr + 1]} << 16); }
 
 private:
-    std::unordered_map<uint16_t, uint16_t> regs_;
+    std::array<uint16_t, kRegisterSpan> regs_{};
 };
 
 InverterIdentity decode_identity(const RegisterBank& bank);
