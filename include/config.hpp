@@ -4,24 +4,17 @@
 #include <string>
 #include <vector>
 
-// One Solarman logger: the TCP transport. Several inverters on its RS485
-// share its connection and request queue.
-struct LoggerConfig {
-    std::string name;                   // section title
-    std::string host;
-    uint16_t    port         = 8899;
-    uint32_t    serial       = 0;       // logger (not inverter) serial number
-    int         timeout_ms   = 5000;
-    int         reconnect_ms = 10000;
-};
-
-// One inverter behind a logger.
+// One inverter and the Solarman logger in front of it.
 struct InverterConfig {
-    std::string name;                   // section title; the API's ?inverter=
-    std::string logger;                 // LoggerConfig::name
-    std::string model;                  // InverterModel::name
+    std::string name;                     // section title; the API's ?inverter=
+    std::string model;                    // InverterModel::name
+    std::string host;                     // logger address
+    uint16_t    port           = 8899;
+    uint32_t    serial         = 0;       // logger (not inverter) serial number
     uint8_t     slave_id       = 1;
+    int         timeout_ms     = 5000;
     int         poll_period_ms = 1000;
+    int         reconnect_ms   = 10000;
 };
 
 struct HttpConfig {
@@ -44,7 +37,6 @@ struct AppConfig {
     int log_level = 4;
     std::string log_file;
 
-    std::vector<LoggerConfig>   loggers;
     std::vector<InverterConfig> inverters;   // at least one
     HttpConfig    http;
     HistoryConfig history;

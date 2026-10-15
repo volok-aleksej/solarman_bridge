@@ -13,14 +13,19 @@ Solarman / IGEN WiFi data logger and serves a web dashboard.
 
 ## Configuration
 
-`/etc/solarman_bridge/solarman_bridge.conf`; the required fields are
-`logger.host` and `logger.serial`. The serial is the **logger's** serial
-number (the logger's web page, `status.html`, shows it as the device serial
-number), not the inverter's.
+`/etc/solarman_bridge/solarman_bridge.conf`. One `inverter "name" { ... }`
+section per inverter, each with its own logger; `model`, `host` and
+`serial` are required. The serial is the **logger's** serial number (the
+logger's web page, `status.html`, shows it as the device serial number),
+not the inverter's.
+
+Every inverter gets its own poller and connection. They share one history
+database, where the section title tells them apart: renaming a section
+starts a new history.
 
 ## Inverter models
 
-`logger.model` picks the register map; the only one so far is
+`model` picks the register map; the only one so far is
 `deye_sg04lp3`. A model is a single file in `src/models/`: it defines an
 `InverterModel` (the blocks to read, the decoders into the common
 `InverterSample`, the run states, the commands) and registers it with a
@@ -32,11 +37,14 @@ model does not have stay 0.
 
 | Path | Returns |
 |---|---|
-| `api/live` | latest sample, `online` / `connected`, sample age, inverter clock |
-| `api/info` | logger and inverter identity, poll statistics, last error |
-| `api/history?time_start=&time_end=&count=` | samples oldest first (unix seconds; decimated to `count` buckets, max 2000) |
-| `api/daily?year=&month=` | daily energy rows for one month |
-| `POST api/command` | runs a named command, body `{"name": "power_on"}` or `"power_off"` |
+| `api/inverters` | the configured inverters |
+| `api/live?inverter=` | latest sample, `online` / `connected`, sample age, inverter clock |
+| `api/info?inverter=` | logger and inverter identity, poll statistics, last error |
+| `api/history?inverter=&time_start=&time_end=&count=` | samples oldest first (unix seconds; decimated to `count` buckets, max 2000) |
+| `api/daily?inverter=&year=&month=` | daily energy rows for one month; `inverter=all` sums all |
+| `POST api/command` | queues a named command, body `{"inverter": "main", "name": "power_on"}`; the outcome shows up in `api/live` as `last_command` |
+
+`inverter` is a section title; without it the first inverter is used.
 
 Sample fields are integers whose names carry the unit: `_w`, `_mv`, `_ma`,
 `_wh`, `_dc` (0.1 °C), `_chz` (0.01 Hz). Battery power is positive when

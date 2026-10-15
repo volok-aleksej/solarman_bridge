@@ -75,27 +75,12 @@ void V5Client::tick() {
             if (now >= deadline_) fail("connect: timeout");
             break;
         case State::Awaiting:
-            if (now >= deadline_) on_timeout();
+            if (now >= deadline_) fail("receive: timeout");
             break;
         case State::Idle:
             send_next();
             break;
     }
-}
-
-// A silent inverter on a shared logger must not cut off the others, so a
-// timeout fails only its request; several in a row mean the link is dead.
-void V5Client::on_timeout() {
-    if (++timeouts_in_row_ >= kTimeoutsToDrop) {
-        fail("receive: timeout");
-        return;
-    }
-    spdlog::debug("v5: receive: timeout, link kept");
-    Request r = std::move(current_);
-    current_ = {};
-    state_ = State::Idle;
-    r.done(false, {}, "receive: timeout");
-    if (state_ == State::Idle) send_next();
 }
 
 void V5Client::close_socket() {
@@ -107,7 +92,6 @@ void V5Client::close_socket() {
     }
     state_ = State::Closed;
     watched_events_ = 0;
-    timeouts_in_row_ = 0;
     tx_.clear();
     rx_.clear();
 }
@@ -260,16 +244,11 @@ void V5Client::process_rx() {
             fail(error);
             return;
         }
-        // NoReply fails only this request: the link is fine, and other
-        // inverters on the same logger may well answer.
-        if ((r == v5::DecodeResult::Ok || r == v5::DecodeResult::NoReply) &&
-            state_ == State::Awaiting) {
+        if (r == v5::DecodeResult::Ok && state_ == State::Awaiting) {
             Request done = std::move(current_);
             current_ = {};
             state_ = State::Idle;
-            const bool ok = r == v5::DecodeResult::Ok;
-            timeouts_in_row_ = 0;
-            done.done(ok, std::move(modbus), ok ? std::string() : error);
+            done.done(true, std::move(modbus), {});
             // The next request goes out at once, not on the next tick.
             if (state_ == State::Idle) send_next();
             return;

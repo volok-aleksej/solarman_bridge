@@ -16,8 +16,7 @@ class Dispatcher;
 // The owner drives it with tick() from its timer; there is no timer here.
 // tick() connects when the link is down (again `reconnect` after a failed
 // attempt or a lost link), and fails a connect or a request that has
-// outlived `timeout`. A timed-out request fails alone; kTimeoutsToDrop in a
-// row drop the link.
+// outlived `timeout`.
 //
 // Requests are taken only while connected. When the link goes down the
 // queue is cleared and every queued request is answered with the error.
@@ -48,7 +47,6 @@ public:
 
 private:
     enum class State { Closed, Connecting, Idle, Awaiting };
-    static constexpr int kTimeoutsToDrop = 3;
     using Clock = std::chrono::steady_clock;
 
     struct Request {
@@ -60,7 +58,6 @@ private:
     void on_socket(uint32_t events);
     void finish_connect();
     void send_next();
-    void on_timeout();
     bool flush_tx();
     void read_socket();
     void process_rx();
@@ -87,7 +84,6 @@ private:
     Request              current_;
     std::vector<uint8_t> tx_;
     std::vector<uint8_t> rx_;
-    int                  timeouts_in_row_ = 0;
     std::string          last_error_;
     // The link keeps failing; only the first failure is logged as a warning.
     bool                 failing_ = false;

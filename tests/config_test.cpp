@@ -19,49 +19,36 @@ bool load(const std::string& text, AppConfig& cfg, std::string& err) {
     return ok;
 }
 
-const char* kLogger = R"(logger "roof" { host = "10.0.0.5"  serial = 123 }
-)";
-
 }  // namespace
 
-TEST(Config, TwoInvertersOnOneLogger) {
+TEST(Config, TwoInverters) {
     AppConfig cfg;
     std::string err;
-    ASSERT_TRUE(load(std::string(kLogger) + R"(
-inverter "a" { logger = "roof"  model = "deye_sg04lp3" }
-inverter "b" { logger = "roof"  model = "deye_sg04lp3"  slave_id = 2  poll_period_ms = 2000 }
+    ASSERT_TRUE(load(R"(
+inverter "a" { model = "deye_sg04lp3"  host = "10.0.0.5"  serial = 123 }
+inverter "b" { model = "deye_sg04lp3"  host = "10.0.0.6"  serial = 456  poll_period_ms = 2000 }
 )", cfg, err)) << err;
-    ASSERT_EQ(cfg.loggers.size(), 1u);
-    EXPECT_EQ(cfg.loggers[0].name, "roof");
-    EXPECT_EQ(cfg.loggers[0].port, 8899);
     ASSERT_EQ(cfg.inverters.size(), 2u);
+    EXPECT_EQ(cfg.inverters[0].name, "a");
+    EXPECT_EQ(cfg.inverters[0].port, 8899);
     EXPECT_EQ(cfg.inverters[0].slave_id, 1);
-    EXPECT_EQ(cfg.inverters[1].name, "b");
-    EXPECT_EQ(cfg.inverters[1].slave_id, 2);
+    EXPECT_EQ(cfg.inverters[1].host, "10.0.0.6");
+    EXPECT_EQ(cfg.inverters[1].serial, 456u);
     EXPECT_EQ(cfg.inverters[1].poll_period_ms, 2000);
 }
 
-TEST(Config, RejectsBadReferences) {
+TEST(Config, RejectsBadInverters) {
     struct Case { const char* text; const char* error; };
     const Case cases[] = {
         {"", "at least one inverter"},
-        {R"(inverter "a" { logger = "nope"  model = "deye_sg04lp3" })", "logger \"nope\" is not defined"},
-        {R"(inverter "a" { logger = "roof"  model = "growatt" })", "model must be one of"},
-        {R"(inverter "a" { logger = "roof"  model = "deye_sg04lp3" }
-            inverter "b" { logger = "roof"  model = "deye_sg04lp3" })", "slave_id 1 is already used"},
+        {R"(inverter "a" { model = "growatt"  host = "h"  serial = 1 })", "model must be one of"},
+        {R"(inverter "a" { model = "deye_sg04lp3"  serial = 1 })", "host is required"},
+        {R"(inverter "a" { model = "deye_sg04lp3"  host = "h" })", "serial is required"},
     };
     for (const Case& c : cases) {
         AppConfig cfg;
         std::string err;
-        EXPECT_FALSE(load(std::string(kLogger) + c.text, cfg, err)) << c.text;
+        EXPECT_FALSE(load(c.text, cfg, err)) << c.text;
         EXPECT_NE(err.find(c.error), std::string::npos) << err;
     }
-}
-
-TEST(Config, RequiresLoggerHostAndSerial) {
-    AppConfig cfg;
-    std::string err;
-    EXPECT_FALSE(load(R"(logger "roof" { serial = 1 }
-inverter "a" { logger = "roof"  model = "deye_sg04lp3" })", cfg, err));
-    EXPECT_NE(err.find("host is required"), std::string::npos) << err;
 }

@@ -11,6 +11,10 @@
 
 namespace {
 
+// Room for a few cycles; a queue that keeps growing means the poll period
+// is shorter than the link needs, and the excess is dropped.
+constexpr size_t kMaxQueue = 16;
+
 // Fallback day key when the inverter clock cannot be decoded.
 std::string local_date() {
     const time_t now = time(nullptr);
@@ -41,14 +45,17 @@ bool read_one(const std::vector<uint8_t>& modbus, uint8_t slave, uint16_t& value
 
 }  // namespace
 
-Poller::Poller(Dispatcher& dispatcher, V5Client& client, const InverterConfig& cfg,
+Poller::Poller(Dispatcher& dispatcher, const InverterConfig& cfg,
                const InverterModel& model, InverterState& state, History& history,
                int history_id, std::chrono::milliseconds sample_period)
     : dispatcher_(dispatcher), cfg_(cfg), model_(model), state_(state), history_(history),
-      history_id_(history_id), sample_period_(sample_period), client_(client) {
-    spdlog::info("poller {}: {} via logger {}, slave {}, every {} ms",
-                 cfg_.name, model_.name, cfg_.logger, cfg_.slave_id,
-                 cfg_.poll_period_ms);
+      history_id_(history_id), sample_period_(sample_period),
+      client_(dispatcher, cfg.host, cfg.port, cfg.serial,
+              std::chrono::milliseconds(cfg.timeout_ms),
+              std::chrono::milliseconds(cfg.reconnect_ms), kMaxQueue) {
+    spdlog::info("poller {}: {} via logger {}:{} serial {} slave {}, every {} ms",
+                 cfg_.name, model_.name, cfg_.host, cfg_.port, cfg_.serial,
+                 cfg_.slave_id, cfg_.poll_period_ms);
     dispatcher_.watch(timer_.fd(), [this] {
         timer_.consume();
         on_tick();

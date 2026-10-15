@@ -280,10 +280,9 @@ void HttpServer::handle_info(evhttp_request* req) {
     CJsonPtr root(cJSON_CreateObject());
 
     cJSON* lg = cJSON_AddObjectToObject(root.p, "logger");
-    cJSON_AddStringToObject(lg, "name",      v->logger.name.c_str());
-    cJSON_AddStringToObject(lg, "host",      v->logger.host.c_str());
-    cJSON_AddNumberToObject(lg, "port",      v->logger.port);
-    cJSON_AddNumberToObject(lg, "serial",    v->logger.serial);
+    cJSON_AddStringToObject(lg, "host",      v->cfg.host.c_str());
+    cJSON_AddNumberToObject(lg, "port",      v->cfg.port);
+    cJSON_AddNumberToObject(lg, "serial",    v->cfg.serial);
     cJSON_AddBoolToObject  (lg, "connected", snap.connected);
 
     cJSON* inv = cJSON_AddObjectToObject(root.p, "inverter");

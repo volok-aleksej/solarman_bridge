@@ -18,7 +18,6 @@ struct InverterModel;
 // What the HTTP thread sees of one inverter.
 struct InverterView {
     const InverterConfig& cfg;
-    const LoggerConfig&   logger;
     const InverterModel&  model;
     InverterState&        state;
     int                   history_id;

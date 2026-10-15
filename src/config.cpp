@@ -4,7 +4,6 @@
 
 #include <confuse.h>
 
-#include <algorithm>
 #include <cerrno>
 #include <cstring>
 
@@ -22,20 +21,15 @@ int vf_range(cfg_t* cfg, cfg_opt_t* opt) {
     return 0;
 }
 
-cfg_opt_t logger_opts[] = {
-    CFG_STR("host",         nullptr, CFGF_NODEFAULT),
-    CFG_INT("serial",       0,       CFGF_NODEFAULT),
-    CFG_INT("port",         8899,    CFGF_NONE),
-    CFG_INT("timeout_ms",   5000,    CFGF_NONE),
-    CFG_INT("reconnect_ms", 10000,   CFGF_NONE),
-    CFG_END()
-};
-
 cfg_opt_t inverter_opts[] = {
-    CFG_STR("logger",         nullptr, CFGF_NODEFAULT),
     CFG_STR("model",          nullptr, CFGF_NODEFAULT),
+    CFG_STR("host",           nullptr, CFGF_NODEFAULT),
+    CFG_INT("serial",         0,       CFGF_NODEFAULT),
+    CFG_INT("port",           8899,    CFGF_NONE),
     CFG_INT("slave_id",       1,       CFGF_NONE),
+    CFG_INT("timeout_ms",     5000,    CFGF_NONE),
     CFG_INT("poll_period_ms", 1000,    CFGF_NONE),
+    CFG_INT("reconnect_ms",   10000,   CFGF_NONE),
     CFG_END()
 };
 
@@ -68,7 +62,6 @@ bool load_config(const std::string& path, AppConfig& out, std::string& error) {
     cfg_opt_t opts[] = {
         CFG_INT("log_level", 4,  CFGF_NONE),
         CFG_STR("log_file",  "", CFGF_NONE),
-        CFG_SEC("logger",   logger_opts,   CFGF_MULTI | CFGF_TITLE | CFGF_NO_TITLE_DUPES),
         CFG_SEC("inverter", inverter_opts, CFGF_MULTI | CFGF_TITLE | CFGF_NO_TITLE_DUPES),
         CFG_SEC("http",    http_opts,    CFGF_NONE),
         CFG_SEC("history", history_opts, CFGF_NONE),
@@ -78,12 +71,12 @@ bool load_config(const std::string& path, AppConfig& out, std::string& error) {
 
     cfg_t* cfg = cfg_init(opts, CFGF_NONE);
     cfg_set_validate_func(cfg, "log_level",              vf_range<1, 5>);
-    cfg_set_validate_func(cfg, "logger|serial",          vf_range<1, 0xFFFFFFFFL>);
-    cfg_set_validate_func(cfg, "logger|port",            vf_range<1, 65535>);
-    cfg_set_validate_func(cfg, "logger|timeout_ms",      vf_range<500, 60000>);
-    cfg_set_validate_func(cfg, "logger|reconnect_ms",    vf_range<1000, 3600000>);
+    cfg_set_validate_func(cfg, "inverter|serial",         vf_range<1, 0xFFFFFFFFL>);
+    cfg_set_validate_func(cfg, "inverter|port",           vf_range<1, 65535>);
     cfg_set_validate_func(cfg, "inverter|slave_id",       vf_range<1, 247>);
+    cfg_set_validate_func(cfg, "inverter|timeout_ms",     vf_range<500, 60000>);
     cfg_set_validate_func(cfg, "inverter|poll_period_ms", vf_range<1000, 3600000>);
+    cfg_set_validate_func(cfg, "inverter|reconnect_ms",   vf_range<1000, 3600000>);
     cfg_set_validate_func(cfg, "http|port",              vf_range<1, 65535>);
     cfg_set_validate_func(cfg, "history|retention_days", vf_range<1, 3650>);
     cfg_set_validate_func(cfg, "history|sample_period_ms", vf_range<1000, 3600000>);
@@ -109,30 +102,11 @@ bool load_config(const std::string& path, AppConfig& out, std::string& error) {
     out.log_level = cfg_getint(cfg, "log_level");
     out.log_file  = sstr(cfg, "log_file");
 
-    for (unsigned i = 0; i < cfg_size(cfg, "logger"); ++i) {
-        cfg_t* sec = cfg_getnsec(cfg, "logger", i);
-        LoggerConfig l;
-        l.name = cfg_title(sec);
-        l.host = sstr(sec, "host");
-        if (l.host.empty()) return fail("logger \"" + l.name + "\": host is required");
-        if (cfg_size(sec, "serial") == 0)
-            return fail("logger \"" + l.name + "\": serial is required");
-        l.serial       = cfg_getint(sec, "serial");
-        l.port         = cfg_getint(sec, "port");
-        l.timeout_ms   = cfg_getint(sec, "timeout_ms");
-        l.reconnect_ms = cfg_getint(sec, "reconnect_ms");
-        out.loggers.push_back(std::move(l));
-    }
-
     for (unsigned i = 0; i < cfg_size(cfg, "inverter"); ++i) {
         cfg_t* sec = cfg_getnsec(cfg, "inverter", i);
         InverterConfig inv;
         inv.name = cfg_title(sec);
         const std::string where = "inverter \"" + inv.name + "\": ";
-        inv.logger = sstr(sec, "logger");
-        if (std::none_of(out.loggers.begin(), out.loggers.end(),
-                         [&](const LoggerConfig& l) { return l.name == inv.logger; }))
-            return fail(where + "logger \"" + inv.logger + "\" is not defined");
         inv.model = sstr(sec, "model");
         if (!find_model(inv.model)) {
             std::string names;
@@ -140,12 +114,15 @@ bool load_config(const std::string& path, AppConfig& out, std::string& error) {
                 names += (names.empty() ? "" : ", ") + std::string(m->name);
             return fail(where + "model must be one of: " + names);
         }
+        inv.host = sstr(sec, "host");
+        if (inv.host.empty()) return fail(where + "host is required");
+        if (cfg_size(sec, "serial") == 0) return fail(where + "serial is required");
+        inv.serial         = cfg_getint(sec, "serial");
+        inv.port           = cfg_getint(sec, "port");
         inv.slave_id       = cfg_getint(sec, "slave_id");
+        inv.timeout_ms     = cfg_getint(sec, "timeout_ms");
         inv.poll_period_ms = cfg_getint(sec, "poll_period_ms");
-        for (const InverterConfig& other : out.inverters)
-            if (other.logger == inv.logger && other.slave_id == inv.slave_id)
-                return fail(where + "slave_id " + std::to_string(inv.slave_id) +
-                            " is already used by \"" + other.name + "\" on the same logger");
+        inv.reconnect_ms   = cfg_getint(sec, "reconnect_ms");
         out.inverters.push_back(std::move(inv));
     }
     if (out.inverters.empty()) return fail("at least one inverter section is required");

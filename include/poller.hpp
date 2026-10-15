@@ -18,15 +18,14 @@ class InverterState;
 
 // Polls one inverter through its logger and runs its commands.
 //
-// One timer, every poll_period_ms: it drives the V5 client (shared by the
-// inverters on one logger) and queues the register reads of one cycle
-// there. Commands requested through
+// One timer, every poll_period_ms: it drives the V5 client and queues the
+// register reads of one cycle there. Commands requested through
 // InverterState go to the head of the same queue. Results land in
 // InverterState (every cycle) and History (one sample per `sample_period`);
 // nothing waits for them. Dispatcher thread only.
 class Poller {
 public:
-    Poller(Dispatcher& dispatcher, V5Client& client, const InverterConfig& cfg,
+    Poller(Dispatcher& dispatcher, const InverterConfig& cfg,
            const InverterModel& model, InverterState& state, History& history,
            int history_id, std::chrono::milliseconds sample_period);
     ~Poller();
@@ -73,7 +72,7 @@ private:
     History&                  history_;
     int                       history_id_;
     std::chrono::milliseconds sample_period_;
-    V5Client&                 client_;
+    V5Client                  client_;
     Timer                     timer_;
 
     // Cycles keep failing; only the first one is logged as a warning.
