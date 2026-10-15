@@ -24,6 +24,7 @@ const InverterCommand* find_command(const std::string& name);
 struct CommandResult {
     bool        ok = false;
     std::string error;
-    uint16_t    before = 0;   // register value before the command
-    uint16_t    after  = 0;   // register value read back afterwards
+    uint16_t    before = 0;   // read first; decides whether and what to write
+    uint16_t    after  = 0;   // read back after the write; verifies it
+                              // (= before when no write was needed)
 };
