@@ -32,7 +32,8 @@ public:
     History& operator=(const History&) = delete;
 
     // Store a sample and refresh the daily_energy row for `day` from its
-    // daily counters. Called by the poller (dispatcher thread).
+    // daily counters; purges old samples once an hour. Called by the poller
+    // (dispatcher thread).
     void append(const InverterSample& s, const std::string& day);
 
     // Drop raw samples older than the retention window.
@@ -51,6 +52,7 @@ private:
 
     std::string db_path_;
     int         retention_days_;
+    std::chrono::steady_clock::time_point next_purge_{};
 
     sqlite3*      db_          = nullptr;   // writer (dispatcher thread)
     sqlite3*      rdb_         = nullptr;   // read-only (HTTP thread)

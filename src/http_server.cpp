@@ -3,7 +3,6 @@
 #include "history.hpp"
 #include "inverter_commands.hpp"
 #include "inverter_state.hpp"
-#include "poller.hpp"
 #include "sample_columns.hpp"
 
 #include <event2/buffer.h>
@@ -21,7 +20,6 @@
 #include <ctime>
 #include <fstream>
 #include <iterator>
-#include <memory>
 #include <stdexcept>
 
 namespace {
@@ -85,12 +83,6 @@ struct Query {
 
 constexpr size_t kMaxBodySize = 1024;
 
-struct PendingCommand {
-    evhttp_request*        req = nullptr;
-    const InverterCommand* cmd = nullptr;
-    event*                 ev = nullptr;
-    CommandResult          result;
-};
 
 const char* mime_for_ext(const std::string& path) {
     auto dot = path.rfind('.');
@@ -109,10 +101,10 @@ const char* mime_for_ext(const std::string& path) {
 
 }  // namespace
 
-HttpServer::HttpServer(const History& history, const InverterState& state,
-                       Poller& poller, const LoggerConfig& logger_cfg,
+HttpServer::HttpServer(const History& history, InverterState& state,
+                       const LoggerConfig& logger_cfg,
                        const HttpConfig& http_cfg, const ControlConfig& control_cfg)
-    : history_(history), state_(state), poller_(poller),
+    : history_(history), state_(state),
       control_enabled_(control_cfg.enabled), logger_cfg_(logger_cfg),
       port_(http_cfg.http_port), www_root_(http_cfg.www_root) {
     evthread_use_pthreads();
@@ -230,6 +222,19 @@ void HttpServer::handle_live(evhttp_request* req) {
         cJSON_AddStringToObject(root.p, "run_state_name",
                                 run_state_name(snap.sample->run_state));
         cJSON_AddItemToObject(root.p, "sample", sample_to_cjson(*snap.sample, true));
+    }
+    if (snap.last_command) {
+        const CommandStatus& c = *snap.last_command;
+        cJSON* lc = cJSON_AddObjectToObject(root.p, "last_command");
+        cJSON_AddStringToObject(lc, "name", c.name.c_str());
+        cJSON_AddNumberToObject(lc, "at",   epoch_ms(c.at));
+        cJSON_AddBoolToObject  (lc, "ok",   c.result.ok);
+        if (c.result.ok) {
+            cJSON_AddNumberToObject(lc, "before", c.result.before);
+            cJSON_AddNumberToObject(lc, "after",  c.result.after);
+        } else {
+            cJSON_AddStringToObject(lc, "error", c.result.error.c_str());
+        }
     }
     if (snap.clock) {
         char buf[20];
@@ -366,37 +371,11 @@ void HttpServer::handle_command(evhttp_request* req) {
     evhttp_connection_get_peer(evhttp_request_get_connection(req), &peer, &peer_port);
     spdlog::info("http: command {} from {}", cmd->name, peer ? peer : "?");
 
-    auto* p = new PendingCommand;
-    p->req = req;
-    p->cmd = cmd;
-    p->ev = event_new(base_, -1, 0, &HttpServer::on_command_done, p);
-    // The callback runs on the dispatcher thread; event_active() hands the
-    // result over to this one.
-    const bool queued = poller_.submit(*cmd, [p](const CommandResult& r) {
-        p->result = r;
-        event_active(p->ev, 0, 0);
-    });
-    if (!queued) {
-        event_free(p->ev);
-        delete p;
-        send_json(req, HTTP_SERVUNAVAIL, "{\"error\":\"command queue is full\"}");
+    if (!state_.request_command(*cmd)) {
+        send_json(req, HTTP_SERVUNAVAIL, "{\"error\":\"too many pending commands\"}");
+        return;
     }
-}
-
-void HttpServer::on_command_done(int, short, void* arg) {
-    std::unique_ptr<PendingCommand> p(static_cast<PendingCommand*>(arg));
-    event_free(p->ev);
-
-    CJsonPtr root(cJSON_CreateObject());
-    cJSON_AddStringToObject(root.p, "command", p->cmd->name);
-    cJSON_AddBoolToObject  (root.p, "ok",      p->result.ok);
-    if (p->result.ok) {
-        cJSON_AddNumberToObject(root.p, "before", p->result.before);
-        cJSON_AddNumberToObject(root.p, "after",  p->result.after);
-    } else {
-        cJSON_AddStringToObject(root.p, "error", p->result.error.c_str());
-    }
-    // A client that went away meanwhile is fine: libevent then just frees
-    // the request.
-    send_json(p->req, p->result.ok ? HTTP_OK : 502, cjson_print(root.p));
+    // The poller picks it up on its next tick; the outcome shows up in
+    // api/live as "last_command".
+    send_json(req, 202, "{\"queued\":true}");
 }

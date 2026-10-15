@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -130,27 +131,44 @@ struct Result {
     std::string error;
 };
 
-// Connect, send one request, run the loop until the reply arrives.
-Result round_trip(Dispatcher& d, V5Client& c) {
-    Result r;
-    c.connect([&](bool ok, const std::string& e) {
-        if (!ok) { r = {true, false, {}, e}; d.stop(); return; }
-        c.request(kReadClock, [&](bool ok2, std::vector<uint8_t> mb,
-                                  const std::string& e2) {
-            r = {true, ok2, std::move(mb), e2};
-            d.stop();
+// Drives `c` like the poller does: tick() every 10 ms.
+struct Harness {
+    Dispatcher d;
+    std::unique_ptr<V5Client> c;
+    std::function<bool()> until;
+    void start(uint16_t port, int timeout_ms = 1000, size_t max_queue = 16) {
+        c = std::make_unique<V5Client>(d, "127.0.0.1", port, kSerial,
+                                       std::chrono::milliseconds(timeout_ms),
+                                       std::chrono::milliseconds(50), max_queue);
+        d.add_timer(10, [this] {
+            c->tick();
+            if (until && until()) d.stop();
         });
-    });
-    d.run();
-    return r;
-}
+    }
+    // Runs the loop until `pred` holds, checked every 10 ms.
+    void run_until(std::function<bool()> pred) {
+        until = std::move(pred);
+        d.run();
+        until = nullptr;
+    }
+    // Connects, sends one request, runs until it is answered.
+    Result round_trip(const std::vector<uint8_t>& frame) {
+        run_until([this] { return c->connected(); });
+        Result r;
+        EXPECT_TRUE(c->submit(frame, [&](bool ok, std::vector<uint8_t> mb, const std::string& e) {
+            r = {true, ok, std::move(mb), e};
+        }, false));
+        run_until([&] { return r.done; });
+        return r;
+    }
+};
 
 }  // namespace
 
 TEST(V5Client, SkipsCounterAndStaleFramesThenReturnsReply) {
-    Dispatcher d;
+    Harness h;
     const auto regs = modbus_regs({0x1a0a, 0x0e10, 0x2715});
-    FakeLogger logger(d, [&](int fd, const std::vector<uint8_t>& req) {
+    FakeLogger logger(h.d, [&](int fd, const std::vector<uint8_t>& req) {
         const uint8_t seq = req[5];
         // Modbus frame of the request starts after header + 15 bytes.
         EXPECT_EQ(std::vector<uint8_t>(req.begin() + 26, req.end() - 2), kReadClock);
@@ -158,58 +176,106 @@ TEST(V5Client, SkipsCounterAndStaleFramesThenReturnsReply) {
         send_bytes(fd, v5_response(v5::kControlResponse, seq - 1, regs));
         send_bytes(fd, v5_response(v5::kControlResponse, seq, regs));
     });
-    V5Client c(d, "127.0.0.1", logger.port(), kSerial, std::chrono::milliseconds(1000));
+    h.start(logger.port());
 
-    const Result r = round_trip(d, c);
-    ASSERT_TRUE(r.done);
+    const Result r = h.round_trip(kReadClock);
     EXPECT_TRUE(r.ok) << r.error;
     EXPECT_EQ(r.modbus, regs);
-    EXPECT_TRUE(c.idle());
+    EXPECT_TRUE(h.c->connected());
 }
 
 TEST(V5Client, TimesOutAndCloses) {
-    Dispatcher d;
-    FakeLogger logger(d, [](int, const std::vector<uint8_t>&) {});  // never answers
-    V5Client c(d, "127.0.0.1", logger.port(), kSerial, std::chrono::milliseconds(100));
+    Harness h;
+    FakeLogger logger(h.d, [](int, const std::vector<uint8_t>&) {});  // never answers
+    h.start(logger.port(), 100);
 
-    const Result r = round_trip(d, c);
-    ASSERT_TRUE(r.done);
+    const Result r = h.round_trip(kReadClock);
     EXPECT_FALSE(r.ok);
     EXPECT_EQ(r.error, "receive: timeout");
-    EXPECT_FALSE(c.connected());
+    EXPECT_FALSE(h.c->connected());
 }
 
 TEST(V5Client, ReportsPeerClose) {
-    Dispatcher d;
+    Harness h;
     FakeLogger* lp = nullptr;
-    FakeLogger logger(d, [&](int, const std::vector<uint8_t>&) { lp->drop_client(); });
+    FakeLogger logger(h.d, [&](int, const std::vector<uint8_t>&) { lp->drop_client(); });
     lp = &logger;
-    V5Client c(d, "127.0.0.1", logger.port(), kSerial, std::chrono::milliseconds(1000));
+    h.start(logger.port());
 
-    const Result r = round_trip(d, c);
-    ASSERT_TRUE(r.done);
+    const Result r = h.round_trip(kReadClock);
     EXPECT_FALSE(r.ok);
     EXPECT_EQ(r.error, "receive: logger closed the connection");
-    EXPECT_FALSE(c.connected());
+    EXPECT_FALSE(h.c->connected());
 }
 
-TEST(V5Client, ConnectRefusedIsReportedAsynchronously) {
-    Dispatcher d;
+TEST(V5Client, RefusesRequestsWithoutALink) {
+    Harness h;
     uint16_t port;
     {
         // A port that was just free: nothing listens there now.
-        FakeLogger tmp(d, [](int, const std::vector<uint8_t>&) {});
+        FakeLogger tmp(h.d, [](int, const std::vector<uint8_t>&) {});
         port = tmp.port();
     }
-    V5Client c(d, "127.0.0.1", port, kSerial, std::chrono::milliseconds(1000));
-    bool called = false;
-    bool ok = true;
-    c.connect([&](bool o, const std::string&) { called = true; ok = o; d.stop(); });
-    EXPECT_FALSE(called);  // never from inside connect()
-    d.run();
-    EXPECT_TRUE(called);
-    EXPECT_FALSE(ok);
-    EXPECT_FALSE(c.connected());
+    h.start(port);
+    auto never = [](bool, std::vector<uint8_t>, const std::string&) { ADD_FAILURE(); };
+    EXPECT_FALSE(h.c->submit(kReadClock, never, false));
+
+    int ticks = 0;
+    h.run_until([&] { return ++ticks == 20; });   // several refused connects
+    EXPECT_FALSE(h.c->connected());
+    EXPECT_FALSE(h.c->last_error().empty());
+    EXPECT_FALSE(h.c->submit(kReadClock, never, false));
+}
+
+TEST(V5Client, LinkLossFailsEveryQueuedRequest) {
+    Harness h;
+    FakeLogger* lp = nullptr;
+    FakeLogger logger(h.d, [&](int, const std::vector<uint8_t>&) { lp->drop_client(); });
+    lp = &logger;
+    h.start(logger.port());
+    h.run_until([&] { return h.c->connected(); });
+
+    std::vector<std::string> errors;
+    for (int i = 0; i < 3; ++i)
+        ASSERT_TRUE(h.c->submit(kReadClock, [&](bool ok, std::vector<uint8_t>, const std::string& e) {
+            EXPECT_FALSE(ok);
+            errors.push_back(e);
+        }, false));
+    h.run_until([&] { return errors.size() == 3; });
+    for (const auto& e : errors) EXPECT_EQ(e, "receive: logger closed the connection");
+}
+
+TEST(V5Client, UrgentRequestsJumpTheQueue) {
+    Harness h;
+    std::vector<uint16_t> seen;   // register addresses in the order sent
+    FakeLogger logger(h.d, [&](int fd, const std::vector<uint8_t>& req) {
+        seen.push_back((req[28] << 8) | req[29]);
+        send_bytes(fd, v5_response(v5::kControlResponse, req[5], modbus_regs({0})));
+    });
+    h.start(logger.port());
+    h.run_until([&] { return h.c->connected(); });
+
+    int answered = 0;
+    auto count = [&](bool, std::vector<uint8_t>, const std::string&) { ++answered; };
+    // All queued before the next tick sends the first one.
+    ASSERT_TRUE(h.c->submit(modbus::build_read_holding(1, 10, 1), count, false));
+    ASSERT_TRUE(h.c->submit(modbus::build_read_holding(1, 20, 1), count, false));
+    ASSERT_TRUE(h.c->submit(modbus::build_read_holding(1, 80, 1), count, true));
+    h.run_until([&] { return answered == 3; });
+    EXPECT_EQ(seen, (std::vector<uint16_t>{80, 10, 20}));
+}
+
+TEST(V5Client, DropsRequestsBeyondTheLimit) {
+    Harness h;
+    FakeLogger logger(h.d, [](int, const std::vector<uint8_t>&) {});
+    h.start(logger.port(), 1000, 2);
+    h.run_until([&] { return h.c->connected(); });
+
+    auto ignore = [](bool, std::vector<uint8_t>, const std::string&) {};
+    EXPECT_TRUE (h.c->submit(kReadClock, ignore, false));
+    EXPECT_TRUE (h.c->submit(kReadClock, ignore, false));
+    EXPECT_FALSE(h.c->submit(kReadClock, ignore, false));
+    EXPECT_FALSE(h.c->submit(kReadClock, ignore, true));   // writes too
 }
 
 TEST(Poller, RunsFullCyclesAndStoresSamples) {
@@ -258,9 +324,9 @@ TEST(Poller, RunsFullCyclesAndStoresSamples) {
     ASSERT_TRUE(snap.sample);
     EXPECT_EQ(snap.sample->batt_soc_pct, 77);
     EXPECT_EQ(snap.stats.cycles_failed, 0u);
-    // Identity once, then clock + 3 live blocks per cycle, on one connection.
+    // Identity once, then clock + 2 live blocks per cycle, on one connection.
     EXPECT_EQ(logger.accepted(), 1);
-    EXPECT_GE(requests, 1 + 3 * 4);
+    EXPECT_GE(requests, 1 + 3 * 3);
 }
 
 namespace {
@@ -322,18 +388,22 @@ protected:
         cfg.host = "127.0.0.1";
         cfg.port = logger.port();
         cfg.serial = kSerial;
-        cfg.poll_period_ms = 1000;
+        cfg.poll_period_ms = 50;
         Poller poller(d, cfg, state, history, std::chrono::milliseconds(0));
 
         CommandResult result;
         bool submitted = false;
         d.add_timer(10, [&] {
-            if (submitted || state.snapshot().stats.cycles_ok < 1) return;
-            submitted = true;
-            EXPECT_TRUE(poller.submit(*find_command(cmd), [&](const CommandResult& r) {
-                result = r;
+            const auto snap = state.snapshot();
+            if (!submitted) {
+                if (snap.stats.cycles_ok < 1) return;
+                submitted = true;
+                EXPECT_TRUE(state.request_command(*find_command(cmd)));
+            } else if (snap.last_command) {
+                EXPECT_EQ(snap.last_command->name, cmd);
+                result = snap.last_command->result;
                 d.stop();
-            }));
+            }
         });
         d.run();
         return result;

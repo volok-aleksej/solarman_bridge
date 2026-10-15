@@ -23,10 +23,11 @@ inline constexpr RegisterBlock kIdentityBlock{0, 8};
 
 // Read on every poll cycle.
 inline constexpr RegisterBlock kClockBlock{62, 3};
+// Every read costs ~130 ms of logger round trip on top of the data, so the
+// blocks are as large as the Modbus limit (125) allows.
 inline constexpr RegisterBlock kLiveBlocks[] = {
-    {500, 60},   // state, daily/total energy counters, temperatures, faults
-    {586, 60},   // battery, grid, inverter output
-    {646, 60},   // load, PV
+    {500, 60},    // state, daily/total energy counters, temperatures, faults
+    {586, 120},   // battery, grid, inverter output, load, PV
 };
 
 constexpr int kPhases = 3;

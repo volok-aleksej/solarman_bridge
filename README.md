@@ -6,7 +6,7 @@ Solarman / IGEN WiFi data logger and serves a web dashboard.
 - Native Solarman V5 client (TCP 8899) carrying Modbus RTU, modelled on
   [pysolarmanv5](https://github.com/jmccrohan/pysolarmanv5): one persistent
   connection, unsolicited counter frames skipped, double-CRC quirk handled.
-- Polls (4 register reads, ~0.7 s per cycle).
+- Polls (3 register reads, ~0.85 s per cycle).
 - SQLite history: raw samples (30 days by default) and one row per day with
   the inverter's own daily energy counters, keyed by the inverter clock.
 - Dashboard: Realtime, History, Energy, Info.

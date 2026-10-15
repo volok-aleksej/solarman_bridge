@@ -11,6 +11,8 @@ const API = {
 };
 
 const LIVE_POLL_MS = 1000;
+// How long the page waits for a queued command's outcome.
+const CMD_WAIT_MS  = 30000;
 // Below this a flow line is drawn idle: sensors read a few watts at rest.
 const FLOW_MIN_W   = 20;
 
@@ -561,8 +563,11 @@ function inverter() {
       return { power_on: 'Turn on', power_off: 'Turn off' }[name] || name;
     },
 
+    // The command is only queued here; its outcome arrives with api/live
+    // as a new last_command.
     async runCommand(c) {
       if (!confirm(`${this.cmdLabel(c.name)}: ${c.description}?`)) return;
+      const prevAt = this.live.last_command ? this.live.last_command.at : 0;
       this.cmdBusy   = true;
       this.cmdStatus = 'sending…';
       try {
@@ -571,10 +576,25 @@ function inverter() {
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({ name: c.name }),
         });
-        const j = await r.json();
-        this.cmdStatus = j.ok
-          ? `done (register ${j.before} → ${j.after})`
-          : 'failed: ' + j.error;
+        if (r.status !== 202) {
+          this.cmdStatus = 'failed: ' + (await r.json()).error;
+          this.cmdBusy = false;
+          return;
+        }
+        this.cmdStatus = 'queued…';
+        const t0 = Date.now();
+        while (Date.now() - t0 < CMD_WAIT_MS) {
+          await new Promise(res => setTimeout(res, LIVE_POLL_MS));
+          const lc = this.live.last_command;
+          if (lc && lc.at !== prevAt) {
+            this.cmdStatus = lc.ok
+              ? `${this.cmdLabel(lc.name)}: done (register ${lc.before} → ${lc.after})`
+              : `${this.cmdLabel(lc.name)}: failed: ${lc.error}`;
+            this.cmdBusy = false;
+            return;
+          }
+        }
+        this.cmdStatus = 'no outcome reported';
       } catch (e) {
         this.cmdStatus = 'failed: ' + e.message;
       }

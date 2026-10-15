@@ -129,6 +129,13 @@ void History::open_db() {
 }
 
 void History::append(const InverterSample& s, const std::string& day) {
+    // Old samples are dropped from here, hourly, rather than from a timer.
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next_purge_) {
+        next_purge_ = now + std::chrono::hours(1);
+        purge();
+    }
+
     std::lock_guard<std::mutex> lk(wmtx_);
     const int64_t ts_ms = to_ms(s.ts);
 

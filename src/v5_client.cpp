@@ -15,7 +15,6 @@
 #include <cerrno>
 #include <cstring>
 #include <random>
-#include <stdexcept>
 
 namespace {
 
@@ -37,88 +36,116 @@ std::string errno_text(const char* what, int err = errno) {
 }  // namespace
 
 V5Client::V5Client(Dispatcher& dispatcher, std::string host, uint16_t port,
-                   uint32_t logger_serial, std::chrono::milliseconds timeout)
+                   uint32_t logger_serial, std::chrono::milliseconds timeout,
+                   std::chrono::milliseconds reconnect, size_t max_queue)
     : dispatcher_(dispatcher), host_(std::move(host)), port_(port),
-      logger_serial_(logger_serial), timeout_(timeout) {
+      logger_serial_(logger_serial), timeout_(timeout), reconnect_(reconnect),
+      max_queue_(max_queue) {
     // Random initial sequence number, like pysolarmanv5: a fresh process
     // must not match a reply the logger still has queued for the old one.
     std::random_device rd;
     seq_ = std::uniform_int_distribution<int>(1, 0xFE)(rd);
-    dispatcher_.watch(timer_.fd(), [this] { on_timer(); });
 }
 
-V5Client::~V5Client() {
-    close();
-    dispatcher_.unwatch(timer_.fd());
+V5Client::~V5Client() { close_socket(); }
+
+bool V5Client::submit(std::vector<uint8_t> modbus_frame, Reply done, bool urgent) {
+    if (!connected()) return false;
+    if (queue_.size() >= max_queue_) {
+        if (!queue_full_logged_)
+            spdlog::warn("v5: request queue full ({}), dropping requests; "
+                         "the poll period is too short for the link", max_queue_);
+        queue_full_logged_ = true;
+        return false;
+    }
+    queue_full_logged_ = false;
+    Request r{std::move(modbus_frame), std::move(done)};
+    if (urgent) queue_.push_front(std::move(r));
+    else        queue_.push_back(std::move(r));
+    return true;
 }
 
-void V5Client::close() {
+void V5Client::tick() {
+    const auto now = Clock::now();
+    switch (state_) {
+        case State::Closed:
+            if (now >= retry_at_) connect();
+            break;
+        case State::Connecting:
+            if (now >= deadline_) fail("connect: timeout");
+            break;
+        case State::Awaiting:
+            if (now >= deadline_) fail("receive: timeout");
+            break;
+        case State::Idle:
+            send_next();
+            break;
+    }
+}
+
+void V5Client::close_socket() {
     if (fd_ >= 0) {
         dispatcher_.unwatch(fd_);
         ::close(fd_);
         fd_ = -1;
         spdlog::debug("v5: connection to {}:{} closed", host_, port_);
     }
-    timer_.disarm();
     state_ = State::Closed;
     watched_events_ = 0;
-    deferred_error_.clear();
     tx_.clear();
     rx_.clear();
-    connect_done_ = nullptr;
-    reply_        = nullptr;
 }
 
-void V5Client::defer_error(std::string error) {
-    deferred_error_ = std::move(error);
-    timer_.arm(std::chrono::milliseconds(0));
+void V5Client::fail(const std::string& error) {
+    const bool was_up = connected();
+    last_error_ = error;
+    close_socket();
+    retry_at_ = Clock::now() + reconnect_;
+
+    std::deque<Request> dropped;
+    dropped.swap(queue_);
+    if (current_.done) dropped.push_front(std::move(current_));
+    current_ = {};
+
+    // The first failure of a streak loudly, the repeats quietly, so a
+    // logger that is off for the night does not flood the log.
+    if (failing_) spdlog::debug("v5: {}", error);
+    else          spdlog::warn("v5: {}{}", error, was_up ? "" : " (connecting)");
+    failing_ = true;
+
+    for (auto& r : dropped) r.done(false, {}, error);
 }
 
-void V5Client::fail(std::string error) {
-    const State was = state_;
-    Done  done  = std::move(connect_done_);
-    Reply reply = std::move(reply_);
-    close();
-    if (was == State::Connecting && done)       done(false, error);
-    else if (was == State::Awaiting && reply)   reply(false, {}, error);
-    else spdlog::info("v5: {}", error);  // an idle connection went away
-}
-
-void V5Client::connect(Done done) {
-    if (state_ != State::Closed)
-        throw std::logic_error("V5Client::connect: not closed");
-    state_        = State::Connecting;
-    connect_done_ = std::move(done);
-
+void V5Client::connect() {
+    // getaddrinfo blocks only when the host is a name, not an address.
     addrinfo hints{};
     hints.ai_family   = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* res = nullptr;
     const std::string port_s = std::to_string(port_);
     if (int rc = getaddrinfo(host_.c_str(), port_s.c_str(), &hints, &res); rc != 0) {
-        defer_error("resolve " + host_ + ": " + gai_strerror(rc));
+        fail("resolve " + host_ + ": " + gai_strerror(rc));
         return;
     }
-
     fd_ = ::socket(res->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd_ < 0) {
         freeaddrinfo(res);
-        defer_error(errno_text("socket"));
+        fail(errno_text("socket"));
         return;
     }
-    const int rc = ::connect(fd_, res->ai_addr, res->ai_addrlen);
+    const int rc  = ::connect(fd_, res->ai_addr, res->ai_addrlen);
     const int err = errno;
     freeaddrinfo(res);
     if (rc < 0 && err != EINPROGRESS) {
-        defer_error(errno_text("connect", err));
+        fail(errno_text("connect", err));
         return;
     }
 
-    // Writability reports the outcome, also for a connect that completed
-    // at once.
+    // Writability reports the outcome, also for a connect done at once.
+    state_    = State::Connecting;
+    deadline_ = Clock::now() + timeout_;
     watched_events_ = EPOLLOUT;
     dispatcher_.watch(fd_, watched_events_, [this](uint32_t ev) { on_socket(ev); });
-    timer_.arm(timeout_);
 }
 
 void V5Client::finish_connect() {
@@ -138,25 +165,22 @@ void V5Client::finish_connect() {
     // are noticed right away.
     watched_events_ = EPOLLIN;
     dispatcher_.modify(fd_, watched_events_);
-    timer_.disarm();
     state_ = State::Idle;
+    failing_ = false;
     spdlog::info("v5: connected to logger {}:{} (serial {})",
                  host_, port_, logger_serial_);
-    Done done = std::move(connect_done_);
-    if (done) done(true, {});
 }
 
-void V5Client::request(const std::vector<uint8_t>& modbus_frame, Reply done) {
-    if (state_ != State::Idle)
-        throw std::logic_error("V5Client::request: not idle");
-
+void V5Client::send_next() {
+    if (queue_.empty()) return;
+    current_ = std::move(queue_.front());
+    queue_.pop_front();
     seq_ = seq_ == 0xFF ? 1 : seq_ + 1;
-    tx_  = v5::encode_request(seq_, logger_serial_, modbus_frame);
+    tx_  = v5::encode_request(seq_, logger_serial_, current_.frame);
     spdlog::trace("v5: SEND {}", hex(tx_.data(), tx_.size()));
-    state_ = State::Awaiting;
-    reply_ = std::move(done);
-    timer_.arm(timeout_);
-    if (!flush_tx()) defer_error(errno_text("send"));
+    state_    = State::Awaiting;
+    deadline_ = Clock::now() + timeout_;
+    if (!flush_tx()) fail(errno_text("send"));
 }
 
 // Sends what the socket takes; the rest waits for EPOLLOUT.
@@ -176,26 +200,14 @@ bool V5Client::flush_tx() {
     return true;
 }
 
-void V5Client::on_timer() {
-    timer_.consume();
-    if (!deferred_error_.empty()) {
-        fail(std::move(deferred_error_));
-        return;
-    }
-    if (state_ == State::Connecting) fail("connect: timeout");
-    else if (state_ == State::Awaiting) fail("receive: timeout");
-}
-
 void V5Client::on_socket(uint32_t events) {
     if (state_ == State::Connecting) {
         finish_connect();
         return;
     }
-    if (events & EPOLLOUT) {
-        if (!flush_tx()) {
-            fail(errno_text("send"));
-            return;
-        }
+    if ((events & EPOLLOUT) && !flush_tx()) {
+        fail(errno_text("send"));
+        return;
     }
     if (events & (EPOLLIN | EPOLLERR | EPOLLHUP)) read_socket();
 }
@@ -233,15 +245,17 @@ void V5Client::process_rx() {
         rx_.erase(rx_.begin(), rx_.begin() + len);
 
         if (r == v5::DecodeResult::Error) {
-            fail(std::move(error));
+            fail(error);
             return;
         }
         if (r == v5::DecodeResult::Ok && state_ == State::Awaiting) {
-            timer_.disarm();
+            Request done = std::move(current_);
+            current_ = {};
             state_ = State::Idle;
-            Reply reply = std::move(reply_);
-            reply(true, std::move(modbus), {});
-            return;  // the callback may have changed everything
+            done.done(true, std::move(modbus), {});
+            // The next request goes out at once, not on the next tick.
+            if (state_ == State::Idle) send_next();
+            return;
         }
         spdlog::debug("v5: ignoring unsolicited/stale frame");
     }

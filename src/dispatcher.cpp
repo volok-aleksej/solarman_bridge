@@ -136,5 +136,6 @@ void Dispatcher::run() {
             }
         }
     }
+    stopping_.store(false);   // run() may be entered again
     spdlog::debug("dispatcher: event loop exited");
 }
