@@ -1,8 +1,15 @@
-solarman-bridge (0.1.0) stable; urgency=medium
+solarman-bridge (1.0.0) stable; urgency=medium
 
-  * Initial release: native Solarman V5 / Modbus RTU client,
-    Deye SG04LP3 register map, SQLite history with decimated range queries
-    and daily energy from the inverter's own counters, HTTP dashboard
-    (Realtime / History / Energy / Info) and JSON API on port 8081.
+  * Initial release. Monitors Deye hybrid inverters through their Solarman
+    WiFi loggers: native Solarman V5 / Modbus RTU client on the dispatcher,
+    one poller per inverter, live data every second.
+  * Several inverters, one config section each; inverter models are one
+    file each in src/models/ (deye_sg04lp3 so far).
+  * SQLite history: one sample per 5 s kept 30 days, daily energy from the
+    inverter's own counters kept for good, per inverter.
+  * Dashboard on port 8081: Realtime power flow with per-node tables,
+    History charts, Energy pies and daily bars per month (one inverter or
+    all), Info. JSON API under api/.
+  * Inverter on/off commands, off unless enabled in the config.
 
- -- Alexey Volokitin <elenaluk89@gmail.com>  Wed, 14 Oct 2026 17:00:00 +0300
+ -- Alexey Volokitin <elenaluk89@gmail.com>  Thu, 15 Oct 2026 12:00:00 +0300
