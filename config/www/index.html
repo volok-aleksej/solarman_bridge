@@ -69,7 +69,9 @@
             :marker-end="flowDir('load')==='in' ? 'url(#arrow)' : null"
             :marker-start="flowDir('load')==='out' ? 'url(#arrow)' : null"></path>
 
+      <!-- The inverter's state; with control enabled also its power button. -->
       <g class="flow-center" :class="{clickable: canControl()}" @click="toggleInverter()">
+        <title x-text="canControl() ? (live.running ? 'Turn the inverter off' : 'Turn the inverter on') : ''"></title>
         <circle cx="320" cy="180" r="34" :class="live.running ? 'on' : 'off'"></circle>
         <text x="320" y="186" text-anchor="middle"
               x-text="live.running ? 'ON' : live.run_state_name.toUpperCase()"></text>
@@ -231,13 +233,22 @@
     </template>
   </div>
 
-  <div class="control-block" x-show="info && info.control.enabled">
-    <span class="ir-label">Inverter control</span>
-    <template x-for="c in (info ? info.control.commands : [])" :key="c.name">
-      <button :disabled="cmdBusy" @click="runCommand(c)" x-text="cmdLabel(c.name)"></button>
-    </template>
-    <span class="hdr-status" x-text="cmdStatus"></span>
-  </div>
+</div>
+
+<!-- ═══════════════════════ PASSWORD DIALOG ═══════════════ -->
+<div class="pw-backdrop" x-show="pw.open" x-cloak @click.self="closePassword()"
+     @keydown.escape.window="pw.open && closePassword()">
+  <form class="pw-dialog" @submit.prevent="submitPassword()">
+    <div class="pw-title" x-text="pw.cmd ? cmdLabel(pw.cmd.name) + ' — ' + inverter : ''"></div>
+    <div class="pw-text" x-text="pw.cmd ? pw.cmd.description + '?' : ''"></div>
+    <input id="pw-input" type="password" autocomplete="current-password"
+           placeholder="Password" x-model="pw.value" :disabled="pw.busy">
+    <div class="pw-error" x-show="pw.error" x-text="pw.error"></div>
+    <div class="pw-buttons">
+      <button type="button" @click="closePassword()">Cancel</button>
+      <button type="submit" class="primary" :disabled="pw.busy || !pw.value">Send</button>
+    </div>
+  </form>
 </div>
 
 <script src="app.js"></script>
