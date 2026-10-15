@@ -72,9 +72,7 @@ private:
 
     bool link_up_        = false;
     bool identity_known_ = false;
-    // Poll cycles are failing while the link is up (Modbus errors, requests
-    // not queued). Set by a failed cycle, cleared by a good one. Only for
-    // logging: the first failure of a streak is a warning, repeats debug.
+    // Cycles keep failing; only the first one is logged as a warning.
     bool failing_        = false;
     std::optional<Clock::time_point> last_stored_;
 };

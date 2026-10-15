@@ -85,9 +85,8 @@ private:
     std::vector<uint8_t> tx_;
     std::vector<uint8_t> rx_;
     std::string          last_error_;
-    // The link keeps failing (connect, timeout, close, bad frame). Set by
-    // fail(), cleared by a successful connect. Only for logging: the first
-    // failure of a streak is a warning, repeats debug.
+    // The link keeps failing; only the first failure is logged as a warning.
     bool                 failing_ = false;
+    // The queue keeps overflowing; only the first drop is logged.
     bool                 queue_full_logged_ = false;
 };
