@@ -36,7 +36,11 @@ public:
 private:
     using Clock = std::chrono::steady_clock;
 
-    // The reads of one cycle, completed in any order.
+    // The reads of one cycle. Each tick makes a new one, owned by a
+    // shared_ptr that every queued read's callback holds: it lives until
+    // the last read is answered (or failed) and the cycle is finished.
+    // A slow cycle may thus overlap the next one; each keeps its own bank
+    // and counter, and the FIFO queue finishes them in order.
     struct Cycle {
         Clock::time_point start;
         RegisterBank      bank;
