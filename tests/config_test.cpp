@@ -52,3 +52,20 @@ TEST(Config, RejectsBadInverters) {
         EXPECT_NE(err.find(c.error), std::string::npos) << err;
     }
 }
+
+TEST(Config, ControlNeedsAPasswordHash) {
+    const std::string inv = R"(inverter "a" { model = "deye_sg04lp3"  host = "h"  serial = 1 }
+)";
+    AppConfig cfg;
+    std::string err;
+    EXPECT_FALSE(load(inv + "control { enabled = true }", cfg, err));
+    EXPECT_NE(err.find("password_hash"), std::string::npos) << err;
+    // A real openssl hash survives the parser unchanged ($ is not special).
+    const std::string hash = "$6$testsalt$51yaaBMXXXt5vK522YOlIMZ267vqHtMIzc2klcsu3EEv/"
+                             "bkRDU9g3UmkypXf.NvlpPpIPK1nX5zdbCeJBiQbB/";
+    EXPECT_TRUE(load(inv + "control { enabled = true  password_hash = \"" + hash + "\" }",
+                     cfg, err)) << err;
+    EXPECT_TRUE(cfg.control.enabled);
+    EXPECT_EQ(cfg.control.password_hash, hash);
+    EXPECT_TRUE(load(inv + "control { enabled = false }", cfg, err)) << err;
+}

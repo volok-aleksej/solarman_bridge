@@ -105,7 +105,7 @@ const char* mime_for_ext(const std::string& path) {
 HttpServer::HttpServer(const History& history, std::vector<InverterView> inverters,
                        const HttpConfig& http_cfg, const ControlConfig& control_cfg)
     : history_(history), inverters_(std::move(inverters)),
-      control_enabled_(control_cfg.enabled),
+      control_enabled_(control_cfg.enabled), password_hash_(control_cfg.password_hash),
       bind_(http_cfg.bind), port_(http_cfg.http_port), www_root_(http_cfg.www_root) {
     evthread_use_pthreads();
     base_ = event_base_new();
@@ -413,13 +413,29 @@ void HttpServer::handle_command(evhttp_request* req) {
     }
 
     // Behind nginx the peer is the proxy; the client is in X-Forwarded-For.
-    const char* from = evhttp_find_header(evhttp_request_get_input_headers(req),
-                                          "X-Forwarded-For");
+    const char* fwd = evhttp_find_header(evhttp_request_get_input_headers(req),
+                                         "X-Forwarded-For");
     char* peer = nullptr;
     uint16_t peer_port = 0;
     evhttp_connection_get_peer(evhttp_request_get_connection(req), &peer, &peer_port);
-    spdlog::info("http: command {} for {} from {}", cmd->name, v->cfg.name,
-                 from ? from : peer ? peer : "?");
+    const char* from = fwd ? fwd : peer ? peer : "?";
+
+    // Every command carries the password; nothing is remembered between them.
+    const auto now = LoginGuard::Clock::now();
+    if (login_guard_.locked(now)) {
+        send_json(req, 429, "{\"error\":\"too many wrong passwords, try again in a minute\"}");
+        return;
+    }
+    const cJSON* pw = cJSON_GetObjectItemCaseSensitive(json.p, "password");
+    if (!cJSON_IsString(pw) || !password_matches(pw->valuestring, password_hash_)) {
+        login_guard_.failed(now);
+        spdlog::warn("http: command {} for {} from {}: wrong password",
+                     cmd->name, v->cfg.name, from);
+        send_json(req, 401, "{\"error\":\"wrong password\"}");
+        return;
+    }
+    login_guard_.succeeded();
+    spdlog::info("http: command {} for {} from {}", cmd->name, v->cfg.name, from);
 
     if (!v->state.request_command(*cmd)) {
         send_json(req, HTTP_SERVUNAVAIL, "{\"error\":\"too many pending commands\"}");

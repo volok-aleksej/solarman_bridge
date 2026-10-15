@@ -10,7 +10,8 @@ Build-Depends: debhelper-compat (= 13),
                libsqlite3-dev,
                libevent-dev (>= 2.1),
                libcjson-dev,
-               libgtest-dev
+               libgtest-dev,
+               libcrypt-dev
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
 

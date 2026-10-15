@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.hpp"
+#include "password.hpp"
 #include "thread.hpp"
 
 #include <cstdint>
@@ -69,6 +70,8 @@ private:
     const History&       history_;
     std::vector<InverterView> inverters_;
     bool                 control_enabled_;
+    std::string          password_hash_;
+    LoginGuard           login_guard_;   // HTTP thread only
     std::string          bind_;
     uint16_t             port_;
     std::string          www_root_;

@@ -48,7 +48,8 @@ cfg_opt_t history_opts[] = {
 };
 
 cfg_opt_t control_opts[] = {
-    CFG_BOOL("enabled", cfg_false, CFGF_NONE),
+    CFG_BOOL("enabled",       cfg_false, CFGF_NONE),
+    CFG_STR ("password_hash", "",        CFGF_NONE),
     CFG_END()
 };
 
@@ -139,8 +140,13 @@ bool load_config(const std::string& path, AppConfig& out, std::string& error) {
         out.history.sample_period_ms = cfg_getint(s, "sample_period_ms");
     }
 
-    if (cfg_t* s = cfg_getsec(cfg, "control"))
-        out.control.enabled = cfg_getbool(s, "enabled");
+    if (cfg_t* s = cfg_getsec(cfg, "control")) {
+        out.control.enabled       = cfg_getbool(s, "enabled");
+        out.control.password_hash = sstr(s, "password_hash");
+    }
+    if (out.control.enabled && out.control.password_hash.rfind('$', 0) != 0)
+        return fail("control { password_hash = ... } is required when control is "
+                    "enabled (make one with: openssl passwd -6)");
 
     cfg_free(cfg);
     return true;

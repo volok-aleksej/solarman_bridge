@@ -19,6 +19,7 @@ pkg_check_modules(SQLITE3           REQUIRED IMPORTED_TARGET sqlite3)
 pkg_check_modules(CJSON             REQUIRED IMPORTED_TARGET libcjson)
 pkg_check_modules(LIBEVENT          REQUIRED IMPORTED_TARGET libevent)
 pkg_check_modules(LIBEVENT_PTHREADS REQUIRED IMPORTED_TARGET libevent_pthreads)
+pkg_check_modules(LIBCRYPT          REQUIRED IMPORTED_TARGET libcrypt)
 
 find_package(spdlog REQUIRED)
 find_package(Threads REQUIRED)
@@ -50,6 +51,7 @@ target_link_libraries(solarman_core PRIVATE
     PkgConfig::CJSON
     PkgConfig::LIBEVENT
     PkgConfig::LIBEVENT_PTHREADS
+    PkgConfig::LIBCRYPT
 )
 
 add_executable(solarman_bridge src/main.cpp)
