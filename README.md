@@ -58,8 +58,11 @@ stays alive. Every write is logged. The endpoint takes only a JSON body, so
 a foreign web page cannot trigger it without a CORS preflight, but it has no
 authentication of its own.
 
-The pages use only relative URLs, so a reverse proxy can mount the service
-under a path prefix (for example `/inverter/`).
+## Behind a reverse proxy
+
+With `http { bind = "127.0.0.1" }` the service is reachable only through a
+reverse proxy on the same host; the pages use relative URLs, so it can
+mount the service under any path prefix.
 
 ## Build, test, package
 

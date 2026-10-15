@@ -18,6 +18,7 @@ struct InverterConfig {
 };
 
 struct HttpConfig {
+    std::string bind = "0.0.0.0";   // 127.0.0.1 behind a reverse proxy
     int http_port = 8081;
     std::string www_root = "/usr/share/solarman_bridge/www";
 };

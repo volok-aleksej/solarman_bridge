@@ -106,7 +106,7 @@ HttpServer::HttpServer(const History& history, std::vector<InverterView> inverte
                        const HttpConfig& http_cfg, const ControlConfig& control_cfg)
     : history_(history), inverters_(std::move(inverters)),
       control_enabled_(control_cfg.enabled),
-      port_(http_cfg.http_port), www_root_(http_cfg.www_root) {
+      bind_(http_cfg.bind), port_(http_cfg.http_port), www_root_(http_cfg.www_root) {
     evthread_use_pthreads();
     base_ = event_base_new();
     if (!base_) throw std::runtime_error("http: event_base_new failed");
@@ -118,8 +118,8 @@ HttpServer::HttpServer(const History& history, std::vector<InverterView> inverte
     evhttp_set_max_body_size(http_, kMaxBodySize);
     evhttp_set_gencb(http_, on_request, this);
 
-    if (evhttp_bind_socket(http_, "0.0.0.0", port_) != 0)
-        throw std::runtime_error("http: cannot bind port " + std::to_string(port_));
+    if (evhttp_bind_socket(http_, bind_.c_str(), port_) != 0)
+        throw std::runtime_error("http: cannot bind " + bind_ + ":" + std::to_string(port_));
 }
 
 HttpServer::~HttpServer() {
@@ -129,7 +129,7 @@ HttpServer::~HttpServer() {
 }
 
 void HttpServer::run() {
-    spdlog::info("http: listening on 0.0.0.0:{}", port_);
+    spdlog::info("http: listening on {}:{}", bind_, port_);
     event_base_dispatch(base_);
     spdlog::info("http: event loop stopped");
 }
@@ -412,11 +412,14 @@ void HttpServer::handle_command(evhttp_request* req) {
         return;
     }
 
+    // Behind nginx the peer is the proxy; the client is in X-Forwarded-For.
+    const char* from = evhttp_find_header(evhttp_request_get_input_headers(req),
+                                          "X-Forwarded-For");
     char* peer = nullptr;
     uint16_t peer_port = 0;
     evhttp_connection_get_peer(evhttp_request_get_connection(req), &peer, &peer_port);
     spdlog::info("http: command {} for {} from {}", cmd->name, v->cfg.name,
-                 peer ? peer : "?");
+                 from ? from : peer ? peer : "?");
 
     if (!v->state.request_command(*cmd)) {
         send_json(req, HTTP_SERVUNAVAIL, "{\"error\":\"too many pending commands\"}");

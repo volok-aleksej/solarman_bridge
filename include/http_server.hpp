@@ -69,6 +69,7 @@ private:
     const History&       history_;
     std::vector<InverterView> inverters_;
     bool                 control_enabled_;
+    std::string          bind_;
     uint16_t             port_;
     std::string          www_root_;
 
