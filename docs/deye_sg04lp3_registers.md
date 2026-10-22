@@ -66,16 +66,22 @@ As the inverter sees the battery.
 
 ## Grid
 
-Power is + when importing, − when exporting. Current is the inverter's
-internal CT.
+Grid power is net: + when importing, − when exporting.
 
 | Dec | Hex | Register | Unit / scale | Access | Notes |
 |---|---|---|---|---|---|
 | 598–600 | 0x0256 | Grid voltage L1 / L2 / L3 | 0.1 V | R | one register per phase (verified) |
+| 604–606 | 0x025C | Internal CT power L1 / L2 / L3 | W, signed | R | equals grid power 622–624 on this unit (verified) |
 | 609 | 0x0261 | Grid frequency | 0.01 Hz | R | verified |
-| 610–612 | 0x0262 | Grid current L1 / L2 / L3 | 0.01 A, signed | R | internal CT (verified) |
-| 622–624 | 0x026E | Grid power L1 / L2 / L3 | W, signed | R | + import / − export (verified) |
+| 610–612 | 0x0262 | Internal CT current L1 / L2 / L3 | 0.01 A, signed | R | inverter AC-port current, tracks the load — **not** net grid current (verified) |
+| 613–615 | 0x0265 | External CT current L1 / L2 / L3 | 0.01 A, signed | R | grid-entry CT; reads ~0 here, no external CT installed (verified) |
+| 622–624 | 0x026E | Grid power L1 / L2 / L3 | W, signed | R | net; + import / − export; = internal CT active power (verified) |
 | 625 | 0x0271 | Grid power total | W, signed | R | verified |
+
+There is **no per-phase grid-meter current register**: the inverter reports net
+grid power directly, and the current registers are apparent CT currents at
+different points (internal CT = inverter port, external CT = grid entry), so
+`V × I` of any of them does not equal the net grid power.
 
 ## Inverter output & load
 

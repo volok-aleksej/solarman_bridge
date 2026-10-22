@@ -273,17 +273,6 @@ function inverter() {
 
     // ── realtime ─────────────────────────────────────────────────────────────
 
-    // The inverter has no load current register: sum of P/U over phases.
-    loadCurrentMa() {
-      const s = this.s;
-      let ma = 0;
-      for (const p of [1, 2, 3]) {
-        const mv = s['load_l' + p + '_voltage_mv'];
-        if (mv > 0) ma += Math.abs(s['load_l' + p + '_power_w']) / mv * 1e6;
-      }
-      return ma;
-    },
-
     // Direction of a flow line, each drawn from its node towards the centre:
     // 'in' means power flows into the inverter, 'out' away from it, '' none.
     flowDir(node) {
@@ -320,23 +309,22 @@ function inverter() {
             rows: [['Today', kWh(s.day_pv_wh)], ['Total', kWh(s.total_pv_wh)]] },
         ];
         case 'grid': return [
-          // The inverter reports one grid frequency for all phases.
-          { head: ['Phase', 'Voltage, V', 'Current, A', 'Power, W', 'Frequency, Hz'],
+          // No real per-phase grid current register: the inverter reports net
+          // grid power directly, and reg 610-612 is the internal CT
+          // (inverter-port) current, not the grid meter. One frequency for all.
+          { head: ['Phase', 'Voltage, V', 'Power, W', 'Frequency, Hz'],
             rows: phases.map(p => ['L' + p, V(s['grid_l' + p + '_voltage_mv']),
-                                   A(s['grid_l' + p + '_current_ma']), s['grid_l' + p + '_power_w'],
+                                   s['grid_l' + p + '_power_w'],
                                    (s.grid_freq_chz / 100).toFixed(2)]) },
           { head: ['Energy, kWh', 'Bought', 'Sold'],
             rows: [['Today', kWh(s.day_grid_buy_wh),   kWh(s.day_grid_sell_wh)],
                    ['Total', kWh(s.total_grid_buy_wh), kWh(s.total_grid_sell_wh)]] },
         ];
         case 'load': return [
-          // No load current register: P / U per phase.
-          { head: ['Phase', 'Voltage, V', 'Current ≈, A', 'Power, W', 'Inverter output, W'],
-            rows: phases.map(p => {
-              const mv = s['load_l' + p + '_voltage_mv'], w = s['load_l' + p + '_power_w'];
-              return ['L' + p, V(mv), mv > 0 ? A(Math.abs(w) / mv * 1e6) : '—', w,
-                      s['inv_l' + p + '_power_w']];
-            }) },
+          // No load current register, so no current column.
+          { head: ['Phase', 'Voltage, V', 'Power, W', 'Inverter output, W'],
+            rows: phases.map(p => ['L' + p, V(s['load_l' + p + '_voltage_mv']),
+                                   s['load_l' + p + '_power_w'], s['inv_l' + p + '_power_w']]) },
           { head: ['Energy, kWh', 'Consumed'],
             rows: [['Today', kWh(s.day_load_wh)], ['Total', kWh(s.total_load_wh)]] },
           { head: ['Inverter', 'DC side, °C', 'AC side, °C'],

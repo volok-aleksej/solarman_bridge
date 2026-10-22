@@ -97,15 +97,13 @@
         <text class="fn-icon" y="-30">&#9889;</text>
         <text class="fn-value" y="10" :class="s.grid_power_w > 0 ? 'neg' : s.grid_power_w < 0 ? 'pos' : ''"
               x-text="watts(s.grid_power_w)"></text>
-        <text class="fn-sub" y="30" x-text="amps(s.grid_l1_current_ma + s.grid_l2_current_ma + s.grid_l3_current_ma)"></text>
-        <text class="fn-sub" y="48" x-text="'bought ' + kwh(s.day_grid_buy_wh)"></text>
-        <text class="fn-sub" y="64" x-text="'sold ' + kwh(s.day_grid_sell_wh)"></text>
+        <text class="fn-sub" y="30" x-text="'bought ' + kwh(s.day_grid_buy_wh)"></text>
+        <text class="fn-sub" y="48" x-text="'sold ' + kwh(s.day_grid_sell_wh)"></text>
       </g>
       <g class="flow-node" transform="translate(530,270)">
         <text class="fn-icon" y="-30">&#127968;</text>
         <text class="fn-value" y="10" x-text="watts(s.load_power_w)"></text>
-        <text class="fn-sub" y="30" x-text="'≈ ' + amps(loadCurrentMa())"></text>
-        <text class="fn-sub" y="48" x-text="'consumed ' + kwh(s.day_load_wh)"></text>
+        <text class="fn-sub" y="30" x-text="'consumed ' + kwh(s.day_load_wh)"></text>
       </g>
     </svg>
 
