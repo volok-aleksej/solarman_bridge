@@ -1,6 +1,7 @@
 #include "dispatcher.hpp"
 #include "history.hpp"
 #include "inverter_model.hpp"
+#include "inverter_settings.hpp"
 #include "inverter_state.hpp"
 #include "modbus_rtu.hpp"
 #include "poller.hpp"
@@ -14,11 +15,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -325,6 +328,8 @@ TEST(Poller, RunsFullCyclesAndStoresSamples) {
     EXPECT_EQ(snap.identity->device_type, 5);
     ASSERT_TRUE(snap.sample);
     EXPECT_EQ(snap.sample->batt_soc_pct, 77);
+    EXPECT_STREQ(snap.sample->run_state_name, "standby");
+    EXPECT_FALSE(snap.sample->running);
     EXPECT_EQ(snap.stats.cycles_failed, 0u);
     // Identity once, then clock + 2 live blocks per cycle, on one connection.
     EXPECT_EQ(logger.accepted(), 1);
@@ -334,24 +339,51 @@ TEST(Poller, RunsFullCyclesAndStoresSamples) {
 namespace {
 
 // A fake inverter behind the fake logger: zeroed registers except the
-// identity, the clock and register 80, which also takes 0x10 writes.
+// identity, the clock and the settings 98..177, which also take 0x10 writes.
 struct FakeInverter {
-    uint16_t reg80 = 1;
+    std::vector<uint16_t> settings = std::vector<uint16_t>(80, 0);   // from 98
     bool     reject_writes = false;
+    bool     ignore_writes = false;   // acknowledged, not stored
     int      writes = 0;
     int      reads  = 0;
+    int      settings_reads = 0;      // reads of the settings block
+    int      stray_writes = 0;        // registers written outside the settings
+    std::vector<uint16_t> written;    // first register of every write
+    std::vector<std::string> requests;   // in the order they came: "r500", "w154"
+
+    FakeInverter() {
+        setting(111) = 1;             // battery managed by SOC
+        setting(115) = 10;            // shutdown, restart, low battery
+        setting(116) = 20;
+        setting(117) = 15;
+        for (int i = 0; i < 6; ++i) {
+            setting(148 + i) = 100 + 400 * i;   // window starts
+            setting(154 + i) = 6000;            // power
+            setting(166 + i) = 50;              // SOC
+            setting(172 + i) = 3;               // charge from grid and generator
+        }
+    }
+    uint16_t& setting(uint16_t reg) { return settings[reg - 98]; }
+    bool is_setting(uint16_t reg) const { return reg >= 98 && reg < 98 + settings.size(); }
 
     void serve(int fd, const std::vector<uint8_t>& req) {
         const uint8_t  func = req[27];
         const uint16_t addr = (req[28] << 8) | req[29];
         const uint16_t qty  = (req[30] << 8) | req[31];
         std::vector<uint8_t> mb;
+        requests.push_back((func == modbus::kWriteMultipleRegisters ? "w" : "r") +
+                           std::to_string(addr));
         if (func == modbus::kWriteMultipleRegisters) {
             ++writes;
+            written.push_back(addr);
             if (reject_writes) {
                 mb = {1, 0x90, 0x02};
             } else {
-                reg80 = (req[33] << 8) | req[34];
+                for (uint16_t i = 0; i < qty && !ignore_writes; ++i) {
+                    const uint16_t v = (req[33 + 2 * i] << 8) | req[34 + 2 * i];
+                    if (is_setting(addr + i)) setting(addr + i) = v;
+                    else                      ++stray_writes;
+                }
                 mb = {1, 0x10, req[28], req[29], req[30], req[31]};
             }
             const uint16_t crc = modbus::crc16(mb.data(), mb.size());
@@ -361,30 +393,41 @@ struct FakeInverter {
             ++reads;
             std::vector<uint16_t> regs(qty, 0);
             if (addr == 0)  regs[0] = 5;
+            if (addr == 20) regs = {0x49f0, 2};                      // 15 kW
             if (addr == 62) regs = {0x1a0a, 0x0e10, 0x2715};
-            if (addr == 80) regs[0] = reg80;
+            if (addr == 98) ++settings_reads;
+            for (uint16_t i = 0; i < qty; ++i)
+                if (is_setting(addr + i)) regs[i] = setting(addr + i);
             mb = modbus_regs(regs);
         }
         send_bytes(fd, v5_response(v5::kControlResponse, req[5], mb));
     }
 };
 
-class PollerCommandTest : public ::testing::Test {
+// What a settings change comes to is not reported anywhere but the log, so
+// the tests look at what the inverter holds and at the settings as the
+// poller has read them.
+class PollerSettingsTest : public ::testing::Test {
 protected:
+    using Over = std::function<bool(const InverterSnapshot&)>;
+
     void SetUp() override {
-        db_ = "/tmp/solarman_cmd_test_" + std::to_string(getpid()) + ".sqlite3";
+        db_ = "/tmp/solarman_settings_test_" + std::to_string(getpid()) + ".sqlite3";
     }
     void TearDown() override {
         for (const char* sfx : {"", "-wal", "-shm"}) std::remove((db_ + sfx).c_str());
     }
 
-    // Runs the poller and submits `cmd` once the first cycle is done.
-    CommandResult run(FakeInverter& inv, const char* cmd) {
+    // Runs the poller, requests `writes` once the settings are read (none:
+    // nothing is requested), and goes on until `over` holds and then for
+    // `linger_ms` more, to see what else the change does. False when `over`
+    // never came. `state` is left as the poller made it.
+    bool change(FakeInverter& inv, std::vector<RegisterWrite> writes, InverterState& state,
+                Over over, int linger_ms = 0) {
         Dispatcher d;
         FakeLogger logger(d, [&](int fd, const std::vector<uint8_t>& req) {
             inv.serve(fd, req);
         });
-        InverterState state;
         History history(db_, 30);
         InverterConfig cfg;
         cfg.name = "main";
@@ -395,65 +438,219 @@ protected:
         Poller poller(d, cfg, *find_model("deye_sg04lp3"), state, history,
                       history.inverter_id("main"), std::chrono::milliseconds(0));
 
-        CommandResult result;
-        bool submitted = false;
+        bool submitted = false, came = false;
+        int ticks = 0, linger = -1;       // of 10 ms
         d.add_timer(10, [&] {
             const auto snap = state.snapshot();
             if (!submitted) {
-                if (snap.stats.cycles_ok < 1) return;
+                if (!snap.settings) return;
                 submitted = true;
-                EXPECT_TRUE(state.request_command(*find_model("deye_sg04lp3")->find_command(cmd)));
-            } else if (snap.last_command) {
-                EXPECT_EQ(snap.last_command->name, cmd);
-                result = snap.last_command->result;
-                d.stop();
+                if (!writes.empty()) {
+                    EXPECT_TRUE(state.request_settings(writes));
+                    EXPECT_FALSE(state.request_settings(writes));   // one at a time
+                }
+            } else if (linger < 0) {
+                if (over(snap)) { came = true; linger = linger_ms / 10; }
+                else if (++ticks > 300) d.stop();                // 3 s: it never came
             }
+            if (linger >= 0 && linger-- == 0) d.stop();
         });
         d.run();
-        return result;
+        EXPECT_EQ(inv.stray_writes, 0);
+        return came;
     }
 
     std::string db_;
 };
 
+// Three poll periods: time enough for a change to do whatever it does.
+constexpr int kSettle = 150;
+
 }  // namespace
 
-TEST_F(PollerCommandTest, PowerOffWritesAndVerifies) {
+TEST_F(PollerSettingsTest, SettingsAreReadWithoutBeingAsked) {
     FakeInverter inv;
-    const CommandResult r = run(inv, "power_off");
-    EXPECT_TRUE(r.ok) << r.error;
-    EXPECT_EQ(r.before, 1);
-    EXPECT_EQ(r.after, 0);
-    EXPECT_EQ(inv.reg80, 0);
-    EXPECT_EQ(inv.writes, 1);
-}
-
-TEST_F(PollerCommandTest, NoWriteWhenAlreadyInState) {
-    FakeInverter inv;
-    const CommandResult r = run(inv, "power_on");
-    EXPECT_TRUE(r.ok) << r.error;
-    EXPECT_EQ(r.before, 1);
-    EXPECT_EQ(r.after, 1);
+    InverterState state;
+    ASSERT_TRUE(change(inv, {}, state, [](const InverterSnapshot&) { return true; }, kSettle));
     EXPECT_EQ(inv.writes, 0);
+    EXPECT_EQ(inv.settings_reads, 1);             // and not again before the refresh is due
+    const auto snap = state.snapshot();
+    ASSERT_TRUE(snap.settings);
+    EXPECT_EQ(snap.settings->u16(148), 100);
+    EXPECT_EQ(snap.settings->u16(159), 6000);
+    EXPECT_EQ(snap.settings->u16(171), 50);
+    EXPECT_EQ(snap.settings->u32(20), 150000u);   // rated power, read along
 }
 
-TEST_F(PollerCommandTest, ReportsModbusException) {
+// Power and SOC of all six windows: two runs of six registers, two writes,
+// nothing read before them and the settings read once after.
+TEST_F(PollerSettingsTest, SettingsChangeWritesEveryRunAndReadsAfter) {
+    FakeInverter inv;
+    InverterState state;
+    const std::vector<RegisterWrite> writes{
+        {154, std::vector<uint16_t>(6, 4000)},
+        {166, std::vector<uint16_t>(6, 30)},
+    };
+    // Over when the page can see it: the settings read after hold the new values.
+    ASSERT_TRUE(change(inv, writes, state, [](const InverterSnapshot& snap) {
+        return snap.settings->u16(156) == 4000 && snap.settings->u16(170) == 30;
+    }, kSettle));
+    EXPECT_EQ(inv.written, (std::vector<uint16_t>{154, 166}));
+    EXPECT_EQ(inv.settings_reads, 2);
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_EQ(inv.setting(154 + i), 4000);
+        EXPECT_EQ(inv.setting(166 + i), 30);
+        EXPECT_EQ(inv.setting(148 + i), 100 + 400 * i);   // untouched
+        EXPECT_EQ(inv.setting(172 + i), 3);
+    }
+}
+
+// A change travels in one batch with the poll cycle: the reads of the
+// cycle, the writes, then the settings as the inverter holds them now.
+TEST_F(PollerSettingsTest, SettingsChangeGoesInOneBatchAfterTheCycle) {
+    FakeInverter inv;
+    InverterState state;
+    const std::vector<RegisterWrite> writes{
+        {154, std::vector<uint16_t>(6, 4000)},
+        {108, {60}},
+    };
+    ASSERT_TRUE(change(inv, writes, state, [](const InverterSnapshot& snap) {
+        return snap.settings->u16(108) == 60;
+    }));
+    const auto w = std::find(inv.requests.begin(), inv.requests.end(), "w154");
+    ASSERT_GE(w - inv.requests.begin(), 3);
+    ASSERT_GE(inv.requests.end() - w, 4);
+    EXPECT_EQ(std::vector<std::string>(w - 3, w + 4),
+              (std::vector<std::string>{"r62", "r500", "r586", "w154", "w108", "r20", "r98"}));
+}
+
+// The inverter refuses the writes: every one is tried once, and the
+// settings are read again so the page shows what the inverter still holds.
+TEST_F(PollerSettingsTest, SettingsWritesRefusedByTheInverterAreNotRepeated) {
     FakeInverter inv;
     inv.reject_writes = true;
-    const CommandResult r = run(inv, "power_off");
-    EXPECT_FALSE(r.ok);
-    EXPECT_NE(r.error.find("illegal data address"), std::string::npos) << r.error;
-    EXPECT_EQ(inv.reg80, 1);
+    InverterState state;
+    const std::vector<RegisterWrite> writes{
+        {154, std::vector<uint16_t>(6, 4000)},
+        {108, {60}},
+    };
+    ASSERT_TRUE(change(inv, writes, state, [&](const InverterSnapshot&) {
+        return inv.writes >= 2 && inv.settings_reads >= 2;   // refused, then read anew
+    }, kSettle));
+    EXPECT_EQ(inv.written, (std::vector<uint16_t>{154, 108}));
+    EXPECT_EQ(inv.setting(154), 6000);
+    EXPECT_EQ(state.snapshot().settings->u16(154), 6000);
 }
 
-TEST_F(PollerCommandTest, KeepsOtherBitsOfTheRegister) {
+// The inverter acknowledges the write and keeps the old value: the read
+// after it shows that, and that is what the page gets.
+TEST_F(PollerSettingsTest, SettingsChangeTheInverterDidNotTakeShowsTheOldValue) {
     FakeInverter inv;
-    inv.reg80 = 0x0102;
-    const CommandResult r = run(inv, "power_on");
-    EXPECT_TRUE(r.ok) << r.error;
-    EXPECT_EQ(inv.reg80, 0x0103);
+    inv.ignore_writes = true;
+    inv.setting(108) = 90;
+    InverterState state;
+    ASSERT_TRUE(change(inv, {{108, {60}}}, state, [&](const InverterSnapshot&) {
+        return inv.writes >= 1 && inv.settings_reads >= 2;
+    }, kSettle));
+    EXPECT_EQ(inv.written, (std::vector<uint16_t>{108}));
+    EXPECT_EQ(state.snapshot().settings->u16(108), 90);
 }
 
+// A change is worked out from the settings as last read, so the next one is
+// not taken until they have been read again after the writes of this one.
+TEST_F(PollerSettingsTest, NextSettingsChangeWaitsForTheReadAfterThisOne) {
+    FakeInverter inv;
+    inv.setting(108) = 90;
+    Dispatcher d;
+    FakeLogger logger(d, [&](int fd, const std::vector<uint8_t>& req) { inv.serve(fd, req); });
+    InverterState state;
+    History history(db_, 30);
+    InverterConfig cfg;
+    cfg.name = "main";
+    cfg.host = "127.0.0.1";
+    cfg.port = logger.port();
+    cfg.serial = kSerial;
+    cfg.poll_period_ms = 50;
+    Poller poller(d, cfg, *find_model("deye_sg04lp3"), state, history,
+                  history.inverter_id("main"), std::chrono::milliseconds(0));
+
+    int step = 0;             // 0 wait for the settings, 1 first change, 2 second
+    int refused = 0, ticks = 0;
+    d.add_timer(10, [&] {
+        const auto snap = state.snapshot();
+        if (step == 0 && snap.settings) {
+            step = 1;
+            EXPECT_TRUE(state.request_settings({{108, {60}}}));
+        } else if (step == 1) {
+            // Tried on every tick: taken only once the first one shows.
+            if (state.request_settings({{109, {120}}})) {
+                EXPECT_EQ(snap.settings->u16(108), 60);
+                step = 2;
+            } else {
+                ++refused;
+            }
+        } else if (step == 2 && snap.settings->u16(109) == 120) {
+            d.stop();
+        }
+        if (++ticks > 300) d.stop();
+    });
+    d.run();
+
+    EXPECT_EQ(step, 2);
+    EXPECT_GT(refused, 0);
+    EXPECT_EQ(inv.written, (std::vector<uint16_t>{108, 109}));
+    EXPECT_EQ(inv.setting(108), 60);
+    EXPECT_EQ(inv.setting(109), 120);
+    EXPECT_EQ(inv.stray_writes, 0);
+}
+
+// A logger slower than the poll period: a tick that finds the cycle still
+// waiting starts no other, so cycles neither pile up nor mix their readings.
+TEST(Poller, SlowLoggerDoesNotOverlapCycles) {
+    Dispatcher d;
+    FakeInverter inv;
+    std::vector<std::pair<int, std::vector<uint8_t>>> waiting;   // requests not answered yet
+    size_t most_waiting = 0;
+    FakeLogger logger(d, [&](int fd, const std::vector<uint8_t>& req) {
+        waiting.emplace_back(fd, req);
+        most_waiting = std::max(most_waiting, waiting.size());
+    });
+    // One answer every 30 ms against a 20 ms poll period.
+    d.add_timer(30, [&] {
+        if (waiting.empty()) return;
+        const auto [fd, req] = waiting.front();
+        waiting.erase(waiting.begin());
+        inv.serve(fd, req);
+    });
+
+    const std::string db = "/tmp/solarman_slow_test_" + std::to_string(getpid()) + ".sqlite3";
+    InverterState state;
+    {
+        History history(db, 30);
+        InverterConfig cfg;
+        cfg.name = "main";
+        cfg.host = "127.0.0.1";
+        cfg.port = logger.port();
+        cfg.serial = kSerial;
+        cfg.poll_period_ms = 20;
+        Poller poller(d, cfg, *find_model("deye_sg04lp3"), state, history,
+                      history.inverter_id("main"), std::chrono::seconds(10));
+        d.add_timer(10, [&] {
+            if (state.snapshot().stats.cycles_ok >= 4) d.stop();
+        });
+        d.run();
+    }
+    for (const char* sfx : {"", "-wal", "-shm"}) std::remove((db + sfx).c_str());
+
+    const auto snap = state.snapshot();
+    EXPECT_GE(snap.stats.cycles_ok, 4u);
+    EXPECT_EQ(snap.stats.cycles_failed, 0u);
+    // Never more in the logger's hands than one cycle (identity + 3 blocks)
+    // and one read of the settings (2 blocks, one after another).
+    EXPECT_LE(most_waiting, 5u);
+    ASSERT_TRUE(snap.sample);
+    EXPECT_STREQ(snap.sample->run_state_name, "standby");
+}
 
 TEST(Poller, StoresOneSamplePerSamplePeriod) {
     Dispatcher d;

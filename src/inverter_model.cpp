@@ -14,10 +14,16 @@ void RegisterBank::put(uint16_t addr, const std::vector<uint16_t>& values) {
     std::copy(values.begin(), values.end(), regs_.begin() + addr);
 }
 
-const InverterCommand* InverterModel::find_command(const std::string& n) const {
-    for (const auto& c : commands)
-        if (n == c.name) return &c;
-    return nullptr;
+bool RegisterBlock::on_block_done(const std::vector<uint16_t>& regs, InverterReadings& out) {
+    bank_.put(addr, regs);
+    return !decode_ || decode_(bank_, out);
+}
+
+SettingRef InverterModel::find_setting(const std::string& name) const {
+    for (const SettingGroup& g : setting_groups)
+        for (const SettingDef& d : g.defs)
+            if (name == d.id) return SettingRef{&g, &d};
+    return {};
 }
 
 namespace {

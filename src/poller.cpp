@@ -11,9 +11,14 @@
 
 namespace {
 
-// Room for a few cycles; a queue that keeps growing means the poll period
-// is shorter than the link needs, and the excess is dropped.
-constexpr size_t kMaxQueue = 16;
+// A batch is all there is in the queue: the reads of the cycle, the writes
+// of a settings change and the reads of the settings.
+constexpr size_t kMaxQueue = 32;
+
+// Settings only change when someone sets them, so they are read this
+// often. A change is worked out from the last read, without another one.
+constexpr auto kSettingsRefresh = std::chrono::seconds(15);
+constexpr const char* kSettings = "settings";
 
 // Fallback day key when the inverter clock cannot be decoded.
 std::string local_date() {
@@ -29,18 +34,8 @@ std::string block_name(const RegisterBlock& b) {
     return "regs " + std::to_string(b.addr) + "+" + std::to_string(b.count);
 }
 
-CommandResult failure(std::string error) {
-    CommandResult r;
-    r.error = std::move(error);
-    return r;
-}
-
-bool read_one(const std::vector<uint8_t>& modbus, uint8_t slave, uint16_t& value,
-              std::string& error) {
-    std::vector<uint16_t> regs;
-    if (!modbus::parse_read_holding(modbus, slave, 1, regs, error)) return false;
-    value = regs[0];
-    return true;
+std::string block_name(const RegisterWrite& w) {
+    return "regs " + std::to_string(w.addr) + "+" + std::to_string(w.values.size());
 }
 
 }  // namespace
@@ -52,7 +47,8 @@ Poller::Poller(Dispatcher& dispatcher, const InverterConfig& cfg,
       history_id_(history_id), sample_period_(sample_period),
       client_(dispatcher, cfg.host, cfg.port, cfg.serial,
               std::chrono::milliseconds(cfg.timeout_ms),
-              std::chrono::milliseconds(cfg.reconnect_ms), kMaxQueue) {
+              std::chrono::milliseconds(cfg.reconnect_ms), kMaxQueue),
+      identity_block_(model.identity), blocks_(model.blocks) {
     spdlog::info("poller {}: {} via logger {}:{} serial {} slave {}, every {} ms",
                  cfg_.name, model_.name, cfg_.host, cfg_.port, cfg_.serial,
                  cfg_.slave_id, cfg_.poll_period_ms);
@@ -70,58 +66,115 @@ Poller::~Poller() {
 void Poller::on_tick() {
     const bool up = client_.connected();
     state_.set_connected(up, client_.last_error());
-    for (const InverterCommand* cmd : state_.take_commands()) {
-        if (up) start_command(*cmd);
-        else    command_done(*cmd, failure("logger not connected"));
+    if (up) {
+        start_batch();
+    } else {
+        // A change is not kept for later: the settings it was worked out
+        // from will be old by then.
+        if (state_.take_settings())
+            spdlog::warn("control {}: {}: not written: logger not connected",
+                         cfg_.name, kSettings);
+        settings_read_at_.reset();   // read them as soon as the link is back
     }
-    if (up) start_cycle();
     client_.tick();
 }
 
-// ---- poll cycle --------------------------------------------------------------
+// ---- batch -------------------------------------------------------------------
 
-void Poller::start_cycle() {
-    // The identity does not change; it is read until it is known.
-    const bool with_identity = !state_.has_identity();
+void Poller::start_batch() {
+    // The previous batch still waits for answers: its requests are in the
+    // queue, and a settings change waits in the state for the next one.
+    if (batch_) return;
 
-    auto c = std::make_shared<Cycle>();
-    c->start = Clock::now();
-    c->left  = model_.blocks.size() + with_identity;
-    auto read = [&](const RegisterBlock& b, bool identity) {
-        const bool queued = client_.submit(
-            modbus::build_read_holding(cfg_.slave_id, b.addr, b.count),
-            [this, c, b, identity](bool ok, std::vector<uint8_t> mb, const std::string& e) {
-                on_block(*c, b, identity, ok, mb, e);
-            },
-            false);
-        if (!queued) block_done(*c, block_name(b) + ": not queued");
-    };
-    if (with_identity) read(model_.identity, true);
-    for (const RegisterBlock& b : model_.blocks) read(b, false);
-}
+    batch_.emplace();
+    batch_->start = Clock::now();
+    batch_->readings.sample.ts = std::chrono::system_clock::now();
+    batch_->left = 1;   // held while the requests are added, see the end
 
-void Poller::on_block(Cycle& c, const RegisterBlock& b, bool identity, bool ok,
-                      const std::vector<uint8_t>& modbus, const std::string& error) {
-    std::vector<uint16_t> regs;
-    std::string perr;
-    if (!ok) {
-        block_done(c, block_name(b) + ": " + error);
-    } else if (!modbus::parse_read_holding(modbus, cfg_.slave_id, b.count, regs, perr)) {
-        block_done(c, block_name(b) + ": " + perr);
-    } else {
-        c.bank.put(b.addr, regs);
-        if (identity) publish_identity(c.bank);
-        block_done(c, {});
+    // The poll cycle goes first, so the settings do not hold the live data
+    // up. The identity does not change; it is read until it is known.
+    if (!state_.has_identity()) read_block(identity_block_, true);
+    for (RegisterBlock& b : blocks_) read_block(b, false);
+
+    if (model_.has_settings()) {
+        // A change, and then the settings as the inverter holds them after it.
+        const auto writes = state_.take_settings();
+        if (writes)
+            for (const RegisterWrite& w : *writes) write_settings(w);
+        if (writes || !settings_read_at_ ||
+            batch_->start - *settings_read_at_ >= kSettingsRefresh) {
+            // Stamped before the answer: a failed read is retried after the same pause.
+            settings_read_at_ = batch_->start;
+            batch_->settings.emplace();
+            for (const RegisterBlock& b : model_.settings) read_settings(b);
+        }
     }
+    request_done();
 }
 
-void Poller::block_done(Cycle& c, std::string error) {
-    if (c.error.empty()) c.error = std::move(error);
-    if (--c.left == 0) finish_cycle(c);
+void Poller::request(std::vector<uint8_t> frame, Answer done) {
+    ++batch_->left;
+    // Queued or not, every request ends here; the last one finishes the batch.
+    const V5Client::Reply reply = [this, done = std::move(done)](
+                                      bool ok, std::vector<uint8_t> mb, const std::string& e) {
+        done(ok, mb, e);
+        request_done();
+    };
+    if (!client_.submit(std::move(frame), reply, false)) reply(false, {}, "not queued");
 }
 
-void Poller::publish_identity(const RegisterBank& bank) {
-    InverterIdentity id = model_.decode_identity(bank);
+void Poller::request_done() {
+    if (--batch_->left == 0) finish_batch();
+}
+
+void Poller::read_block(RegisterBlock& b, bool identity) {
+    request(modbus::build_read_holding(cfg_.slave_id, b.addr, b.count),
+            [this, &b, identity](bool ok, const std::vector<uint8_t>& mb, const std::string& e) {
+        batch_->cycle_end = Clock::now();
+        std::vector<uint16_t> regs;
+        std::string err = e;
+        if (ok && modbus::parse_read_holding(mb, cfg_.slave_id, b.count, regs, err)) {
+            if (b.on_block_done(regs, batch_->readings)) {
+                if (identity && batch_->readings.identity)
+                    publish_identity(*batch_->readings.identity);
+                return;
+            }
+            err = "cannot be decoded";
+        }
+        if (batch_->error.empty()) batch_->error = block_name(b) + ": " + err;
+    });
+}
+
+// What comes of a write goes to the log only; the page sees the settings
+// as they are read after it.
+void Poller::write_settings(const RegisterWrite& w) {
+    request(modbus::build_write_multiple(cfg_.slave_id, w.addr, w.values),
+            [this, w](bool ok, const std::vector<uint8_t>& mb, const std::string& e) {
+        std::string err = e;
+        if (ok && modbus::parse_write_multiple(mb, cfg_.slave_id, w.addr, w.values.size(), err))
+            spdlog::info("control {}: {}: {} written", cfg_.name, kSettings, block_name(w));
+        else
+            spdlog::warn("control {}: {}: {} not written: {}", cfg_.name, kSettings,
+                         block_name(w), err);
+    });
+}
+
+void Poller::read_settings(const RegisterBlock& b) {
+    request(modbus::build_read_holding(cfg_.slave_id, b.addr, b.count),
+            [this, &b](bool ok, const std::vector<uint8_t>& mb, const std::string& e) {
+        std::vector<uint16_t> regs;
+        std::string err = e;
+        if (ok && modbus::parse_read_holding(mb, cfg_.slave_id, b.count, regs, err)) {
+            if (batch_->settings) batch_->settings->put(b.addr, regs);
+            return;
+        }
+        // Part of the settings is no settings: the state keeps the last full read.
+        batch_->settings.reset();
+        spdlog::debug("poller {}: {}: {}: {}", cfg_.name, kSettings, block_name(b), err);
+    });
+}
+
+void Poller::publish_identity(InverterIdentity id) {
     spdlog::info("poller {}: inverter serial {} device type {}",
                  cfg_.name, id.serial, id.device_type);
     if (model_.device_type && id.device_type != model_.device_type)
@@ -130,24 +183,30 @@ void Poller::publish_identity(const RegisterBank& bank) {
     state_.set_identity(std::move(id));
 }
 
-void Poller::finish_cycle(Cycle& c) {
-    if (!c.error.empty()) {
+void Poller::finish_batch() {
+    // The batch and its readings end here, whatever comes of them.
+    Batch b = std::move(*batch_);
+    batch_.reset();
+
+    if (b.settings) state_.set_settings(std::move(*b.settings));
+
+    if (!b.error.empty()) {
         // A lost link is logged by the client; only cycle errors here.
         if (client_.connected()) {
-            if (failing_) spdlog::debug("poller {}: {}", cfg_.name, c.error);
-            else          spdlog::warn("poller {}: {}", cfg_.name, c.error);
+            if (failing_) spdlog::debug("poller {}: {}", cfg_.name, b.error);
+            else          spdlog::warn("poller {}: {}", cfg_.name, b.error);
             failing_ = true;
         }
-        state_.record_failure(c.error);
+        state_.record_failure(b.error);
         return;
     }
     if (failing_) spdlog::info("poller {}: inverter answering again", cfg_.name);
     failing_ = false;
 
-    InverterSample sample = model_.decode_sample(c.bank);
-    std::optional<InverterClock> clock = model_.decode_clock(c.bank);
+    InverterSample& sample = b.readings.sample;
+    const std::optional<InverterClock>& clock = b.readings.clock;
     const int64_t cycle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 Clock::now() - c.start).count();
+                                 b.cycle_end - b.start).count();
     spdlog::trace("poller {}: pv={}W batt={}W soc={}% grid={}W load={}W ({} ms)",
                   cfg_.name, sample.pv_power_w[0] + sample.pv_power_w[1],
                   sample.batt_power_w, sample.batt_soc_pct,
@@ -157,96 +216,9 @@ void Poller::finish_cycle(Cycle& c) {
     // Half a poll period of slack, so cycle jitter does not push a stored
     // sample to the next cycle.
     const auto slack = std::chrono::milliseconds(cfg_.poll_period_ms / 2);
-    if (!last_stored_ || c.start - *last_stored_ >= sample_period_ - slack) {
+    if (!last_stored_ || b.start - *last_stored_ >= sample_period_ - slack) {
         history_.append(history_id_, sample, clock ? clock->date() : local_date());
-        last_stored_ = c.start;
+        last_stored_ = b.start;
     }
     state_.apply_cycle(std::move(sample), clock, cycle_ms);
-}
-
-// ---- commands: read, write, read back, all at the head of the queue ----------
-
-void Poller::start_command(const InverterCommand& cmd) {
-    const bool queued = client_.submit(
-        modbus::build_read_holding(cfg_.slave_id, cmd.reg, 1),
-        [this, &cmd](bool ok, std::vector<uint8_t> mb, const std::string& e) {
-            on_command_read(cmd, ok, mb, e);
-        },
-        true);
-    if (!queued) command_done(cmd, failure("read: not queued"));
-}
-
-void Poller::on_command_read(const InverterCommand& cmd, bool ok,
-                             const std::vector<uint8_t>& modbus,
-                             const std::string& error) {
-    CommandResult r;
-    std::string perr;
-    if (!ok) {
-        r.error = "read: " + error;
-    } else if (!read_one(modbus, cfg_.slave_id, r.before, perr)) {
-        r.error = "read: " + perr;
-    } else {
-        const uint16_t target = (r.before & ~cmd.mask) | cmd.bits;
-        if (target == r.before) {
-            r.ok    = true;
-            r.after = r.before;
-        } else {
-            spdlog::warn("control {}: {}: writing reg {} 0x{:04x} -> 0x{:04x}",
-                         cfg_.name, cmd.name, cmd.reg, r.before, target);
-            const bool queued = client_.submit(
-                modbus::build_write_multiple(cfg_.slave_id, cmd.reg, {target}),
-                [this, &cmd, r](bool ok2, std::vector<uint8_t> mb, const std::string& e) {
-                    on_command_write(cmd, r, ok2, mb, e);
-                },
-                true);
-            if (queued) return;
-            r.error = "write: not queued";
-        }
-    }
-    command_done(cmd, std::move(r));
-}
-
-void Poller::on_command_write(const InverterCommand& cmd, CommandResult r, bool ok,
-                              const std::vector<uint8_t>& modbus,
-                              const std::string& error) {
-    std::string perr;
-    if (!ok) {
-        r.error = "write: " + error;
-    } else if (!modbus::parse_write_multiple(modbus, cfg_.slave_id, cmd.reg, 1, perr)) {
-        r.error = "write: " + perr;
-    } else {
-        const bool queued = client_.submit(
-            modbus::build_read_holding(cfg_.slave_id, cmd.reg, 1),
-            [this, &cmd, r](bool ok2, std::vector<uint8_t> mb, const std::string& e) {
-                on_command_verify(cmd, r, ok2, mb, e);
-            },
-            true);
-        if (queued) return;
-        r.error = "verify: not queued";
-    }
-    command_done(cmd, std::move(r));
-}
-
-void Poller::on_command_verify(const InverterCommand& cmd, CommandResult r, bool ok,
-                               const std::vector<uint8_t>& modbus,
-                               const std::string& error) {
-    std::string perr;
-    if (!ok) {
-        r.error = "verify: " + error;
-    } else if (!read_one(modbus, cfg_.slave_id, r.after, perr)) {
-        r.error = "verify: " + perr;
-    } else if ((r.after & cmd.mask) != cmd.bits) {
-        r.error = fmt::format("reg {} reads 0x{:04x} after the write", cmd.reg, r.after);
-    } else {
-        r.ok = true;
-    }
-    command_done(cmd, std::move(r));
-}
-
-void Poller::command_done(const InverterCommand& cmd, CommandResult r) {
-    if (r.ok)
-        spdlog::info("control {}: {}: done, reg {} = 0x{:04x}", cfg_.name, cmd.name, cmd.reg, r.after);
-    else
-        spdlog::warn("control {}: {}: failed: {}", cfg_.name, cmd.name, r.error);
-    state_.set_command(cmd.name, std::move(r));
 }

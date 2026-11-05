@@ -18,6 +18,34 @@ bool password_matches(const std::string& password, const std::string& hash) {
     return diff == 0;
 }
 
+std::optional<std::string> basic_auth_password(const char* header) {
+    static const char kScheme[] = "Basic ";
+    if (!header || std::strncmp(header, kScheme, sizeof(kScheme) - 1) != 0) return std::nullopt;
+
+    // Base64, padding optional.
+    std::string decoded;
+    unsigned acc = 0;
+    int bits = 0;
+    for (const char* p = header + sizeof(kScheme) - 1; *p && *p != '='; ++p) {
+        int v;
+        if      (*p >= 'A' && *p <= 'Z') v = *p - 'A';
+        else if (*p >= 'a' && *p <= 'z') v = *p - 'a' + 26;
+        else if (*p >= '0' && *p <= '9') v = *p - '0' + 52;
+        else if (*p == '+')              v = 62;
+        else if (*p == '/')              v = 63;
+        else return std::nullopt;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            decoded += static_cast<char>((acc >> bits) & 0xFF);
+        }
+    }
+    const size_t colon = decoded.find(':');
+    if (colon == std::string::npos) return std::nullopt;
+    return decoded.substr(colon + 1);
+}
+
 void LoginGuard::failed(Clock::time_point now) {
     if (++failures_ >= kMaxFailures) {
         failures_     = 0;

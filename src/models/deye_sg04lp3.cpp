@@ -8,38 +8,57 @@ namespace {
 // Temperatures are reported with a +100.0 °C offset, in 0.1 °C.
 constexpr int kTempOffsetDc = 1000;
 
-InverterIdentity decode_identity(const RegisterBank& bank) {
+// ---- blocks ------------------------------------------------------------------
+// One decoder per block; each sees only the registers of its own block.
+
+// 0..7: device type and serial number.
+bool decode_identity(const RegisterBank& b, InverterReadings& out) {
     InverterIdentity id;
-    id.device_type = bank.u16(0);
+    id.device_type = b.u16(0);
     // Serial number: 10 ASCII characters in regs 3..7, high byte first.
     for (uint16_t r = 3; r <= 7; ++r) {
-        const uint16_t v = bank.u16(r);
+        const uint16_t v = b.u16(r);
         for (char c : {static_cast<char>(v >> 8), static_cast<char>(v & 0xFF)})
             if (c > ' ' && c < 0x7F) id.serial += c;
     }
-    return id;
+    out.identity = std::move(id);
+    return true;
 }
 
-std::optional<InverterClock> decode_clock(const RegisterBank& bank) {
+// 62..64: the inverter's clock. Garbage is not an error: the cycle then
+// has no clock and the day comes from the host.
+bool decode_clock(const RegisterBank& b, InverterReadings& out) {
     // 62: YY MM, 63: DD hh, 64: mm ss
     InverterClock c;
-    c.year   = 2000 + (bank.u16(62) >> 8);
-    c.month  = bank.u16(62) & 0xFF;
-    c.day    = bank.u16(63) >> 8;
-    c.hour   = bank.u16(63) & 0xFF;
-    c.minute = bank.u16(64) >> 8;
-    c.second = bank.u16(64) & 0xFF;
-    if (c.month < 1 || c.month > 12 || c.day < 1 || c.day > 31 ||
-        c.hour > 23 || c.minute > 59 || c.second > 59)
-        return std::nullopt;
-    return c;
+    c.year   = 2000 + (b.u16(62) >> 8);
+    c.month  = b.u16(62) & 0xFF;
+    c.day    = b.u16(63) >> 8;
+    c.hour   = b.u16(63) & 0xFF;
+    c.minute = b.u16(64) >> 8;
+    c.second = b.u16(64) & 0xFF;
+    if (c.month >= 1 && c.month <= 12 && c.day >= 1 && c.day <= 31 &&
+        c.hour <= 23 && c.minute <= 59 && c.second <= 59)
+        out.clock = c;
+    return true;
 }
 
-InverterSample decode_sample(const RegisterBank& b) {
-    InverterSample s;
-    s.ts = std::chrono::system_clock::now();
+const char* state_name(uint16_t state) {
+    switch (state) {
+        case 0:  return "standby";
+        case 1:  return "selfcheck";
+        case 2:  return "normal";
+        case 3:  return "alarm";
+        case 4:  return "fault";
+        default: return "unknown";
+    }
+}
 
-    s.run_state = b.u16(500);
+// 500..559: run state, energy counters, temperatures, warnings and faults.
+bool decode_state(const RegisterBank& b, InverterReadings& out) {
+    InverterSample& s = out.sample;
+    s.run_state      = b.u16(500);
+    s.run_state_name = state_name(s.run_state);
+    s.running        = s.run_state == 2;
 
     // Counters in 0.1 kWh
     s.day_batt_charge_wh    = b.u16(514) * 100;
@@ -61,7 +80,12 @@ InverterSample decode_sample(const RegisterBank& b) {
 
     s.warning_bits = b.u32(553);
     s.fault_bits   = b.u32(555) | (uint64_t{b.u32(557)} << 32);
+    return true;
+}
 
+// 586..705: battery, grid, inverter output, load, PV strings.
+bool decode_power(const RegisterBank& b, InverterReadings& out) {
+    InverterSample& s = out.sample;
     s.batt_temp_dc    = b.u16(586) - kTempOffsetDc;
     s.batt_voltage_mv = b.u16(587) * 10;
     s.batt_soc_pct    = b.u16(588);
@@ -86,46 +110,153 @@ InverterSample decode_sample(const RegisterBank& b) {
         s.pv_voltage_mv[i] = b.u16(676 + 2 * i) * 100;
         s.pv_current_ma[i] = b.u16(677 + 2 * i) * 100;
     }
-    return s;
+    return true;
 }
 
-const char* state_name(uint16_t state) {
-    switch (state) {
-        case 0:  return "standby";
-        case 1:  return "selfcheck";
-        case 2:  return "normal";
-        case 3:  return "alarm";
-        case 4:  return "fault";
-        default: return "unknown";
-    }
+// ---- setting conditions, checks and limits -----------------------------------
+
+bool by_soc(const RegisterBank& b)     { return b.u16(111) == 1; }
+bool by_voltage(const RegisterBank& b) { return b.u16(111) == 0; }
+
+std::string soc_levels(const RegisterBank& b) {
+    if (b.u16(115) <= b.u16(117) && b.u16(117) <= b.u16(116)) return {};
+    return "shutdown, low battery and restart SOC must not go down in this order";
 }
 
-bool running(uint16_t state) { return state == 2; }
+std::string voltage_levels(const RegisterBank& b) {
+    if (b.u16(118) <= b.u16(120) && b.u16(120) <= b.u16(119)) return {};
+    return "shutdown, low battery and restart voltage must not go down in this order";
+}
+
+int32_t rated_power_w(const RegisterBank& b) { return b.u32(20) / 10; }
+
+// ---- setting makers ----------------------------------------------------------
+
+// Each makes the SettingDef of one sort of setting, so that the list of
+// settings below is only a list.
+
+SettingDef number(const char* id, const char* label, uint16_t reg, const char* unit,
+                  SettingLimit min, SettingLimit max, uint16_t div = 1) {
+    SettingDef d{id, label, SettingKind::Number, {reg}};
+    d.writable = true;
+    d.unit     = unit;
+    d.div      = div;
+    d.min      = min;
+    d.max      = max;
+    return d;
+}
+
+// A battery level as voltage, in 0.01 V: only with a battery managed by voltage.
+SettingDef volts(const char* id, const char* label, uint16_t reg, int32_t min, int32_t max) {
+    SettingDef d = number(id, label, reg, "V", min, max, 100);
+    d.applies = by_voltage;
+    return d;
+}
+
+// A battery level as SOC: only with a battery managed by SOC.
+SettingDef percent(const char* id, const char* label, uint16_t reg) {
+    SettingDef d = number(id, label, reg, "%", 0, 100);
+    d.applies = by_soc;
+    return d;
+}
+
+// One of the three levels of the ladder, with its check.
+SettingDef level(SettingDef d) {
+    d.check = d.applies == by_soc ? soc_levels : voltage_levels;
+    return d;
+}
+
+SettingDef flag(const char* id, const char* label, uint16_t reg, uint16_t mask) {
+    SettingDef d{id, label, SettingKind::Flag, {reg}};
+    d.mask     = mask;
+    d.writable = true;
+    return d;
+}
+
+SettingDef choice(const char* id, const char* label, uint16_t reg,
+                  std::vector<const char*> choices) {
+    SettingDef d{id, label, SettingKind::Choice, {reg}};
+    d.choices = std::move(choices);
+    return d;
+}
+
+constexpr int kWindows = 6;
+
+// A time-of-use setting: one value for all six windows. On this inverter
+// the windows of a value are six registers in a row; `d` names the first.
+SettingDef windows(SettingDef d) {
+    const uint16_t first = d.regs[0];
+    d.regs.clear();
+    for (int i = 0; i < kWindows; ++i) d.regs.push_back(first + i);
+    return d;
+}
+
+// ---- settings ----------------------------------------------------------------
+
+const std::vector<SettingGroup> kSettingGroups{
+    // A window's charge sources are bit 0 (grid) and bit 1 (generator) of
+    // one register.
+    {"tou", "Time of use",
+     "Every value here is set for all six time windows at once; what is shown is "
+     "the first window's. Power is the most the battery may give or take. The "
+     "battery is discharged down to the level, and charged up to it from the "
+     "ticked sources.",
+     {
+         windows(number("tou_power", "Power", 154, "W", 0, rated_power_w)),
+         windows(percent("tou_soc", "SOC", 166)),
+         windows(volts("tou_voltage", "Voltage", 160, 3800, 6300)),
+         windows(flag("tou_grid_charge", "Grid charge", 172, 0x1)),
+         windows(flag("tou_gen_charge", "Generator charge", 172, 0x2)),
+     }},
+    {"charge", "Charge & signals",
+     "Charging starts when the battery is at or below the start level.",
+     {
+         flag("grid_charge", "Grid charge", 130, 0x1),
+         flag("grid_signal", "Grid signal", 140, 0x1),
+         percent("grid_start_soc", "Grid charge start", 127),
+         volts("grid_start_voltage", "Grid charge start", 126, 3800, 6300),
+         number("grid_current", "Grid charge current", 128, "A", 0, 350),
+         flag("gen_charge", "Generator charge", 129, 0x1),
+         flag("gen_signal", "Generator signal", 140, 0x2),
+         percent("gen_start_soc", "Generator charge start", 124),
+         volts("gen_start_voltage", "Generator charge start", 123, 3800, 6300),
+         number("gen_current", "Generator charge current", 125, "A", 0, 240),
+         number("gen_run_time", "Generator max run time", 121, "h", 0, 240, 10),
+         number("gen_down_time", "Generator down time", 122, "h", 0, 240, 10),
+     }},
+    {"battery", "Battery limits", "",
+     {
+         choice("battery_type", "Battery type", 98, {"Lead-acid", "Lithium"}),
+         choice("battery_mode", "Managed by", 111, {"Voltage", "SOC", "No battery"}),
+         number("capacity", "Capacity", 102, "Ah", 0, 2000),
+         number("max_charge_current", "Max charge current", 108, "A", 0, 350),
+         number("max_discharge_current", "Max discharge current", 109, "A", 0, 350),
+         level(percent("shutdown_soc", "Shutdown", 115)),
+         level(percent("low_soc", "Low battery", 117)),
+         level(percent("restart_soc", "Restart", 116)),
+         level(volts("shutdown_voltage", "Shutdown", 118, 3800, 6100)),
+         level(volts("low_voltage", "Low battery", 120, 3800, 6100)),
+         level(volts("restart_voltage", "Restart", 119, 3800, 6100)),
+     }},
+};
 
 const InverterModel kModel{
     "deye_sg04lp3",
     "Deye three-phase LV hybrid (SUN-*K-SG04LP3)",
     5,
-    {0, 8},   // type, serial
+    {0, 8, decode_identity},
     {
         // Every read costs ~130 ms of logger round trip on top of the
         // data, so the blocks are as large as the Modbus limit allows.
-        {62, 3},      // clock
-        {500, 60},    // state, daily/total energy counters, temperatures, faults
-        {586, 120},   // battery, grid, inverter output, load, PV
+        {62, 3, decode_clock},
+        {500, 60, decode_state},
+        {586, 120, decode_power},
     },
-    decode_identity,
-    decode_clock,
-    decode_sample,
-    state_name,
-    running,
     {
-        // Register 80 (0x0050) bit 0 is the remote power switch (ha-solarman
-        // deye_p3 "On/Off Switch"). Off stops inverting and charging; the
-        // display stays alive.
-        {"power_on",  "turn the inverter on",  80, 0x0001, 0x0001},
-        {"power_off", "turn the inverter off", 80, 0x0001, 0x0000},
+        {20, 2},    // rated power
+        {98, 80},   // 98..177: battery and time of use
     },
+    kSettingGroups,
 };
 
 const ModelRegistrar kRegistrar{kModel};

@@ -9,7 +9,7 @@ Solarman / IGEN WiFi data logger and serves a web dashboard.
 - Polls (3 register reads, ~0.85 s per cycle).
 - SQLite history: raw samples (30 days by default) and one row per day with
   the inverter's own daily energy counters, keyed by the inverter clock.
-- Dashboard: Realtime, History, Energy, Info.
+- Dashboard: Realtime, History, Energy, Settings, Info.
 
 ## Configuration
 
@@ -27,9 +27,15 @@ starts a new history.
 
 `model` picks the register map; the only one so far is
 `deye_sg04lp3`. A model is a single file in `src/models/`: it defines an
-`InverterModel` (the blocks to read, the decoders into the common
-`InverterSample`, the run states, the commands) and registers it with a
-static `ModelRegistrar`. CMake picks the file up by itself and the tests
+`InverterModel` and registers it with a static `ModelRegistrar`. The model
+itself is only a list: the identity block, the blocks read on every cycle,
+the blocks of the settings and the settings in their groups. What the
+registers mean lives with them: each block has a decoder that puts its own
+registers into the common `InverterSample`, `InverterClock` or
+`InverterIdentity` (the run state arrives there with its name and the
+"on" flag, ready to show), and each setting has its own functions for
+whether the inverter has it, its limits and whether it fits with the
+others. CMake picks the file up by itself and the tests
 check every registered model, so nothing else needs editing. Fields a
 model does not have stay 0.
 
@@ -42,7 +48,8 @@ model does not have stay 0.
 | `api/info?inverter=` | logger and inverter identity, poll statistics, last error |
 | `api/history?inverter=&time_start=&time_end=&count=` | samples oldest first (unix seconds; decimated to `count` buckets, max 2000) |
 | `api/daily?inverter=&year=&month=` | daily energy rows for one month; `inverter=all` sums all |
-| `POST api/command` | queues a named command, body `{"inverter": "main", "name": "power_on"}`; the outcome shows up in `api/live` as `last_command` |
+| `GET api/settings?inverter=` | every setting of the inverter, in groups: name, label, kind, unit, limits, value |
+| `PUT api/settings?inverter=&<name>=<value>&...` | queues a change of the named settings; no body; `GET api/settings` shows what the inverter holds afterwards |
 
 `inverter` is a section title; without it the first inverter is used.
 
@@ -50,15 +57,58 @@ Sample fields are integers whose names carry the unit: `_w`, `_mv`, `_ma`,
 `_wh`, `_dc` (0.1 °C), `_chz` (0.01 Hz). Battery power is positive when
 discharging; grid power is positive when importing.
 
-Commands are off unless `control { enabled = true }` is set, and then each
-one must carry the password whose crypt(3) hash is in
-`control { password_hash }` (`openssl passwd -6`); five wrong passwords in
-a row lock commands out for a minute. There is no raw register write: each
-command owns some bits of one register, which is read, changed, written
-with Modbus function 0x10 and read back. The power switch is register 80
-bit 0. Off stops inverting and charging; the display stays alive. Every
-write is logged. The endpoint takes only a JSON body, so a foreign web page
-cannot trigger it without a CORS preflight.
+The only thing the service writes to the inverter is a settings change
+(below), and only with `control { enabled = true }` and the password whose
+crypt(3) hash is in `control { password_hash }` (`openssl passwd -6`); five
+wrong passwords in a row lock changes out for a minute. There is no raw
+register write and no way to switch the inverter on or off.
+
+## Settings
+
+The Settings tab shows the inverter's own settings and changes them. What
+there is to show comes from the model: `setting_groups` in its file lists
+the groups (the page's tabs) and, for every setting, the registers and bits
+that hold it, its kind, unit and limits, and when the inverter has it. A
+setting with several registers is one value for all of them: a write sets
+every register, a read takes the first. A limit is a fixed value or a function of the settings registers: the
+time-of-use power goes up to the rated power, which is read along with the
+settings like any other register. `GET api/settings` hands that description out together with the values;
+the page draws whatever it gets and knows no setting by name. Every group
+is a plain list of settings.
+
+For `deye_sg04lp3` the groups are Time of use (power, SOC or voltage and
+charge sources, each set for all six windows at once), Charge & signals
+(grid and generator charging) and Battery limits. Which of the SOC and the voltage settings exist depends on
+how the battery is managed (register 111); the other set is left out.
+
+Every setting has its own name (`tou_power`).
+`PUT api/settings?<name>=<value>&...` changes the ones it names, any number
+in one request and nothing else: there is no body and no GET of a single
+setting. Values are numbers in the setting's unit (`47.5`), `true` / `false`
+(or `1` / `0`) for a flag, the index for a choice. A name that does not
+exist in the current battery mode, a read-only setting and a value off its
+range or step are refused with 400 and nothing is queued; so is a change
+after which the settings would not agree with each other (shutdown, low
+battery and restart levels in order). An accepted change is answered with
+202, or with 200 when the inverter holds all of it already. Whether the
+inverter took it is not reported: the service reads the settings again
+after the writes and `GET api/settings` shows what the inverter holds; a
+failure is in the log.
+
+A change needs the control password, sent as `Authorization: Basic` (the
+user name is ignored).
+
+Nothing is read for a change. The service works out what to write from the
+settings as it read them last (they are read every 15 s, and right after a
+change), so a setting changed on the inverter's screen within those seconds
+is not seen yet: a flag that shares its register with the one being changed
+goes back to what was read. Only the registers that differ are written, each
+run of neighbours with one `0x10` request, and only registers of settings
+the model marks writable. Every write is logged with the old and the new
+values. The next change is taken after the settings have been read again.
+
+The regular read every 15 s also shows on the page the changes made on the
+inverter's screen or in the vendor's app.
 
 ## Behind a reverse proxy
 

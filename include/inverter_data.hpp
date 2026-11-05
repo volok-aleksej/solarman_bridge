@@ -2,19 +2,28 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
-// Model-independent inverter data. A model (see inverter_model.hpp) reads
-// registers into a RegisterBank and decodes them into these structures;
-// whatever a model does not have stays 0.
+// Model-independent inverter data. A model (see inverter_model.hpp) lists
+// blocks of registers; each block decodes what it has read into these
+// structures. Whatever a model does not have stays 0.
 //
 // Units follow the bms_bridge convention: integers with the unit in the
 // field name (mv, ma, w, wh, dc = 0.1 °C, chz = 0.01 Hz).
 
-struct RegisterBlock {
-    uint16_t addr;    // first register
-    uint16_t count;   // registers in a row, at most modbus::kMaxReadQuantity
+// Holding registers by number. A register that was not put reads as 0.
+class RegisterBank {
+public:
+    void put(uint16_t addr, const std::vector<uint16_t>& values);
+    uint16_t u16(uint16_t addr) const { return addr < regs_.size() ? regs_[addr] : 0; }
+    int16_t  s16(uint16_t addr) const { return static_cast<int16_t>(u16(addr)); }
+    // Two registers, low word first
+    uint32_t u32(uint16_t addr) const { return u16(addr) | (uint32_t{u16(addr + 1)} << 16); }
+
+private:
+    std::vector<uint16_t> regs_;
 };
 
 constexpr int kPhases = 3;
@@ -33,7 +42,11 @@ struct InverterClock {
 struct InverterSample {
     std::chrono::system_clock::time_point ts;
 
-    uint16_t run_state = 0;        // model-specific; see InverterModel::state_name
+    // The model's own code, kept in the history, and what it means, ready
+    // to show. The name is a string literal of the model.
+    uint16_t    run_state      = 0;
+    const char* run_state_name = "";
+    bool        running        = false;   // the "ON" on the page
 
     // PV strings
     int32_t  pv_power_w[kPvStrings]   = {};
@@ -85,16 +98,37 @@ struct InverterSample {
     int64_t  total_batt_discharge_wh = 0;
 };
 
-// The blocks read in one cycle, indexed by register number. A register no
-// block covers reads as 0.
-class RegisterBank {
+// What the blocks of one poll cycle fill in. The poller makes it when a
+// cycle starts and drops it when the cycle is finished.
+struct InverterReadings {
+    std::optional<InverterIdentity> identity;   // by the identity block
+    std::optional<InverterClock>    clock;      // when a block holds a sane one
+    InverterSample                  sample;
+};
+
+// A run of holding registers read with one request, together with the
+// registers as last read and what they mean: its decoder puts them into
+// the readings of the cycle. A model lists its blocks; every poller works
+// on copies of its own, so what a block holds belongs to one inverter.
+class RegisterBlock {
 public:
-    void put(uint16_t addr, const std::vector<uint16_t>& values);
-    uint16_t u16(uint16_t addr) const { return addr < regs_.size() ? regs_[addr] : 0; }
-    int16_t  s16(uint16_t addr) const { return static_cast<int16_t>(u16(addr)); }
-    // Two registers, low word first
-    uint32_t u32(uint16_t addr) const { return u16(addr) | (uint32_t{u16(addr + 1)} << 16); }
+    // False when the registers make no sense; the cycle fails then.
+    using Decode = bool (*)(const RegisterBank& regs, InverterReadings& out);
+
+    RegisterBlock(uint16_t addr, uint16_t count, Decode decode = nullptr)
+        : addr(addr), count(count), decode_(decode) {}
+
+    uint16_t addr;    // first register
+    uint16_t count;   // registers in a row, at most modbus::kMaxReadQuantity
+
+    // Takes the answer to its read and decodes it. A block without a
+    // decoder only keeps the registers.
+    bool on_block_done(const std::vector<uint16_t>& regs, InverterReadings& out);
+
+    const RegisterBank& bank() const { return bank_; }
+    bool has_decoder() const { return decode_ != nullptr; }
 
 private:
-    std::vector<uint16_t> regs_;
+    RegisterBank bank_;
+    Decode       decode_;
 };
