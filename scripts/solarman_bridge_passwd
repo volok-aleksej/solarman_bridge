@@ -1,0 +1,83 @@
+#!/bin/sh
+# Sets the password that settings changes must carry.
+#
+#   solarman_bridge_passwd        asks for the new password, twice
+#   solarman_bridge_passwd -g     makes a random one and prints it
+#
+# The password itself is not kept anywhere: its crypt(3) hash goes into
+# control { password_hash } of the config, and the service is restarted to
+# take it. The config is $SOLARMAN_BRIDGE_CONFIG, or the one in /etc.
+set -eu
+
+CONFIG=${SOLARMAN_BRIDGE_CONFIG:-/etc/solarman_bridge/solarman_bridge.conf}
+SERVICE=solarman-bridge
+
+die() { echo "solarman_bridge_passwd: $*" >&2; exit 1; }
+
+generate=0
+case "${1:-}" in
+    "")  ;;
+    -g)  generate=1 ;;
+    *)   echo "usage: solarman_bridge_passwd [-g]" >&2; exit 2 ;;
+esac
+
+[ -f "$CONFIG" ] || die "no config at $CONFIG"
+[ -w "$CONFIG" ] || die "cannot write $CONFIG (run as root)"
+command -v openssl >/dev/null || die "openssl is not installed"
+
+# Reads one line without showing it when typed at a terminal.
+ask() {
+    printf '%s' "$1" >&2
+    if [ -t 0 ]; then
+        stty -echo
+        trap 'stty echo' EXIT INT TERM
+    fi
+    IFS= read -r REPLY || REPLY=
+    if [ -t 0 ]; then
+        stty echo
+        trap - EXIT INT TERM
+        echo >&2
+    fi
+}
+
+if [ "$generate" = 1 ]; then
+    password=$(openssl rand -base64 12)
+else
+    ask "New password: ";   password=$REPLY
+    ask "Once more: ";      again=$REPLY
+    [ -n "$password" ]          || die "the password is empty"
+    [ "$password" = "$again" ]  || die "the two do not match"
+fi
+
+hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
+
+# The hash replaces the password_hash line of the control section, also a
+# commented one; a section without the line gets it before its closing brace.
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+awk -v hash="$hash" '
+    function put() { print "    password_hash = \"" hash "\""; done = 1 }
+    /^control[ \t]*\{/                                 { control = 1 }
+    control && /^[ \t]*#?[ \t]*password_hash[ \t]*=/   { if (!done) put(); next }
+    control && /^\}/                                   { if (!done) put(); control = 0 }
+                                                       { print }
+    END                                                { exit done ? 0 : 1 }
+' "$CONFIG" > "$tmp" || die "no control { } section in $CONFIG"
+cat "$tmp" > "$CONFIG"      # in place: the owner and the mode stay
+
+echo "password hash written to $CONFIG"
+if ! awk '/^control[ \t]*\{/ { c = 1 } c && /^\}/ { c = 0 }
+          c && /^[ \t]*enabled[ \t]*=[ \t]*true/ { on = 1 } END { exit on ? 0 : 1 }' "$CONFIG"; then
+    echo "note: control is not enabled in the config, so no change is taken yet"
+fi
+
+if command -v systemctl >/dev/null && systemctl is-active --quiet "$SERVICE"; then
+    systemctl restart "$SERVICE"
+    echo "$SERVICE restarted"
+else
+    echo "restart the service to take the new password"
+fi
+
+if [ "$generate" = 1 ]; then
+    echo "the new password: $password"
+fi

@@ -59,8 +59,10 @@ discharging; grid power is positive when importing.
 
 The only thing the service writes to the inverter is a settings change
 (below), and only with `control { enabled = true }` and the password whose
-crypt(3) hash is in `control { password_hash }` (`openssl passwd -6`); five
-wrong passwords in a row lock changes out for a minute. There is no raw
+crypt(3) hash is in `control { password_hash }`; five wrong passwords in a
+row lock changes out for a minute. `solarman_bridge_passwd` sets the
+password: it asks for a new one (or makes a random one with `-g`), writes
+its hash to the config and restarts the service. There is no raw
 register write and no way to switch the inverter on or off.
 
 ## Settings

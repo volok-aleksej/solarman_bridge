@@ -19,7 +19,8 @@ Package: solarman-bridge
 Architecture: amd64
 Depends: ${shlibs:Depends},
          ${misc:Depends},
-         sqlite3
+         sqlite3,
+         openssl
 Description: Deye hybrid inverter monitor over a Solarman WiFi logger
  solarman_bridge polls a Deye three-phase hybrid inverter through its
  Solarman / IGEN WiFi data logger (Solarman V5 protocol, TCP port 8899),

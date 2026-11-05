@@ -1,3 +1,4 @@
 usr/bin/solarman_bridge
+usr/bin/solarman_bridge_passwd
 usr/share/solarman_bridge/solarman_bridge.conf.template
 usr/share/solarman_bridge/www/*
