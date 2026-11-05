@@ -16,10 +16,12 @@
 
 #include <chrono>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <stdexcept>
 
 namespace {
@@ -114,7 +116,7 @@ HttpServer::HttpServer(const History& history, std::vector<InverterView> inverte
     http_ = evhttp_new(base_);
     if (!http_) throw std::runtime_error("http: evhttp_new failed");
     evhttp_set_allowed_methods(http_, EVHTTP_REQ_GET | EVHTTP_REQ_HEAD |
-                                      EVHTTP_REQ_POST);
+                                      EVHTTP_REQ_PUT);
     evhttp_set_max_body_size(http_, kMaxBodySize);
     evhttp_set_gencb(http_, on_request, this);
 
@@ -145,13 +147,16 @@ void HttpServer::on_request(evhttp_request* req, void* arg) {
     std::string path = p && p[0] ? p : "/";
     if (path == "/") path = "/index.html";
 
-    const bool post = evhttp_request_get_command(req) == EVHTTP_REQ_POST;
-    if (post != (path == "/api/command")) {
+    const evhttp_cmd_type method = evhttp_request_get_command(req);
+    const bool read   = method == EVHTTP_REQ_GET || method == EVHTTP_REQ_HEAD;
+    const bool change = method == EVHTTP_REQ_PUT && path == "/api/settings";
+    if (!read && !change) {
         send_json(req, HTTP_BADMETHOD, "{\"error\":\"method not allowed\"}");
         return;
     }
 
-    if      (path == "/api/command")   self->handle_command(req);
+    if      (change)                   self->handle_settings_change(req);
+    else if (path == "/api/settings")  self->handle_settings(req);
     else if (path == "/api/inverters") self->handle_inverters(req);
     else if (path == "/api/live")      self->handle_live(req);
     else if (path == "/api/info")    self->handle_info(req);
@@ -245,23 +250,9 @@ void HttpServer::handle_live(evhttp_request* req) {
     cJSON_AddStringToObject(root.p, "inverter",  v->cfg.name.c_str());
     cJSON_AddNumberToObject(root.p, "poll_period_ms", v->cfg.poll_period_ms);
     if (snap.sample) {
-        cJSON_AddStringToObject(root.p, "run_state_name",
-                                v->model.state_name(snap.sample->run_state));
-        cJSON_AddBoolToObject  (root.p, "running", v->model.running(snap.sample->run_state));
+        cJSON_AddStringToObject(root.p, "run_state_name", snap.sample->run_state_name);
+        cJSON_AddBoolToObject  (root.p, "running",        snap.sample->running);
         cJSON_AddItemToObject(root.p, "sample", sample_to_cjson(*snap.sample, true));
-    }
-    if (snap.last_command) {
-        const CommandStatus& c = *snap.last_command;
-        cJSON* lc = cJSON_AddObjectToObject(root.p, "last_command");
-        cJSON_AddStringToObject(lc, "name", c.name.c_str());
-        cJSON_AddNumberToObject(lc, "at",   epoch_ms(c.at));
-        cJSON_AddBoolToObject  (lc, "ok",   c.result.ok);
-        if (c.result.ok) {
-            cJSON_AddNumberToObject(lc, "before", c.result.before);
-            cJSON_AddNumberToObject(lc, "after",  c.result.after);
-        } else {
-            cJSON_AddStringToObject(lc, "error", c.result.error.c_str());
-        }
     }
     if (snap.clock) {
         char buf[20];
@@ -298,13 +289,6 @@ void HttpServer::handle_info(evhttp_request* req) {
 
     cJSON* ctl = cJSON_AddObjectToObject(root.p, "control");
     cJSON_AddBoolToObject(ctl, "enabled", control_enabled_);
-    cJSON* cmds = cJSON_AddArrayToObject(ctl, "commands");
-    for (const auto& c : v->model.commands) {
-        cJSON* o = cJSON_CreateObject();
-        cJSON_AddStringToObject(o, "name",        c.name);
-        cJSON_AddStringToObject(o, "description", c.description);
-        cJSON_AddItemToArray(cmds, o);
-    }
 
     cJSON* st = cJSON_AddObjectToObject(root.p, "stats");
     cJSON_AddNumberToObject(st, "cycles_ok",     snap.stats.cycles_ok);
@@ -382,36 +366,8 @@ void HttpServer::handle_daily(evhttp_request* req) {
     send_json(req, HTTP_OK, cjson_print(root.p));
 }
 
-void HttpServer::handle_command(evhttp_request* req) {
-    if (!control_enabled_) {
-        send_json(req, 403,
-                  "{\"error\":\"control is disabled in the config\"}");
-        return;
-    }
-    // A JSON body is not a "simple" cross-origin request, so a foreign page
-    // cannot fire a command without a CORS preflight, which is not served.
-    const char* ctype = evhttp_find_header(evhttp_request_get_input_headers(req),
-                                           "Content-Type");
-    if (!ctype || std::string(ctype).compare(0, 16, "application/json") != 0) {
-        send_json(req, 415, "{\"error\":\"expected application/json\"}");
-        return;
-    }
-
-    evbuffer* in = evhttp_request_get_input_buffer(req);
-    std::string body(evbuffer_get_length(in), '\0');
-    evbuffer_copyout(in, body.data(), body.size());
-    CJsonPtr json(cJSON_Parse(body.c_str()));
-    const cJSON* inv  = cJSON_GetObjectItemCaseSensitive(json.p, "inverter");
-    const InverterView* v = pick(req, cJSON_IsString(inv) ? inv->valuestring : nullptr);
-    if (!v) return;
-    const cJSON* name = cJSON_GetObjectItemCaseSensitive(json.p, "name");
-    const InverterCommand* cmd =
-        cJSON_IsString(name) ? v->model.find_command(name->valuestring) : nullptr;
-    if (!cmd) {
-        send_json(req, HTTP_BADREQUEST, "{\"error\":\"unknown command\"}");
-        return;
-    }
-
+bool HttpServer::authorize(evhttp_request* req, const char* password, const char* what,
+                           const InverterView& v) {
     // Behind nginx the peer is the proxy; the client is in X-Forwarded-For.
     const char* fwd = evhttp_find_header(evhttp_request_get_input_headers(req),
                                          "X-Forwarded-For");
@@ -420,28 +376,209 @@ void HttpServer::handle_command(evhttp_request* req) {
     evhttp_connection_get_peer(evhttp_request_get_connection(req), &peer, &peer_port);
     const char* from = fwd ? fwd : peer ? peer : "?";
 
-    // Every command carries the password; nothing is remembered between them.
+    // Every change carries the password; nothing is remembered between them.
     const auto now = LoginGuard::Clock::now();
     if (login_guard_.locked(now)) {
         send_json(req, 429, "{\"error\":\"too many wrong passwords, try again in a minute\"}");
-        return;
+        return false;
     }
-    const cJSON* pw = cJSON_GetObjectItemCaseSensitive(json.p, "password");
-    if (!cJSON_IsString(pw) || !password_matches(pw->valuestring, password_hash_)) {
+    if (!password || !password_matches(password, password_hash_)) {
         login_guard_.failed(now);
-        spdlog::warn("http: command {} for {} from {}: wrong password",
-                     cmd->name, v->cfg.name, from);
+        spdlog::warn("http: {} for {} from {}: wrong password", what, v.cfg.name, from);
         send_json(req, 401, "{\"error\":\"wrong password\"}");
-        return;
+        return false;
     }
     login_guard_.succeeded();
-    spdlog::info("http: command {} for {} from {}", cmd->name, v->cfg.name, from);
+    spdlog::info("http: {} for {} from {}", what, v.cfg.name, from);
+    return true;
+}
 
-    if (!v->state.request_command(*cmd)) {
-        send_json(req, HTTP_SERVUNAVAIL, "{\"error\":\"too many pending commands\"}");
+// ---- settings ----------------------------------------------------------------
+
+namespace {
+
+const char* kind_name(SettingKind k) {
+    switch (k) {
+        case SettingKind::Number: return "number";
+        case SettingKind::Flag:   return "flag";
+        case SettingKind::Choice: return "choice";
+    }
+    return "";
+}
+
+// One setting as the page draws it: what it is, its limits and its value.
+cJSON* setting_to_cjson(const SettingDef& d, const RegisterBank& bank) {
+    const uint16_t raw = settings::raw(d, bank);
+    cJSON* o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "name",  d.id);
+    cJSON_AddStringToObject(o, "label", d.label);
+    cJSON_AddStringToObject(o, "kind",  kind_name(d.kind));
+    switch (d.kind) {
+        case SettingKind::Number: {
+            const auto range = settings::limits(d, bank);
+            cJSON_AddStringToObject(o, "unit",  d.unit);
+            cJSON_AddNumberToObject(o, "min",   double(range.first)  / d.div);
+            cJSON_AddNumberToObject(o, "max",   double(range.second) / d.div);
+            cJSON_AddNumberToObject(o, "step",  1.0 / d.div);
+            cJSON_AddNumberToObject(o, "value", double(raw) / d.div);
+            break;
+        }
+        case SettingKind::Flag:
+            cJSON_AddBoolToObject(o, "value", settings::is_on(d, bank));
+            break;
+        case SettingKind::Choice: {
+            cJSON* arr = cJSON_AddArrayToObject(o, "choices");
+            for (const char* c : d.choices) cJSON_AddItemToArray(arr, cJSON_CreateString(c));
+            cJSON_AddNumberToObject(o, "value", raw);
+            break;
+        }
+    }
+    cJSON_AddBoolToObject(o, "writable", d.writable);
+    return o;
+}
+
+}  // namespace
+
+void HttpServer::handle_settings(evhttp_request* req) {
+    const Query q(req);
+    const InverterView* v = pick(req, q.str("inverter"));
+    if (!v) return;
+    const InverterSnapshot snap = v->state.snapshot();
+    CJsonPtr root(cJSON_CreateObject());
+
+    cJSON_AddStringToObject(root.p, "inverter", v->cfg.name.c_str());
+    // Whether changes are taken at all; each setting says if it is writable.
+    cJSON_AddBoolToObject  (root.p, "control",  control_enabled_);
+    cJSON_AddBoolToObject  (root.p, "known",    snap.settings.has_value());
+    cJSON* groups = cJSON_AddArrayToObject(root.p, "groups");
+    if (snap.settings) {
+        const RegisterBank& bank = *snap.settings;
+        cJSON_AddNumberToObject(root.p, "age_ms",
+            epoch_ms(std::chrono::system_clock::now()) - epoch_ms(snap.settings_at));
+
+        for (const SettingGroup& g : v->model.setting_groups) {
+            cJSON* go = cJSON_CreateObject();
+            cJSON_AddStringToObject(go, "id",    g.id);
+            cJSON_AddStringToObject(go, "title", g.title);
+            cJSON_AddStringToObject(go, "note",  g.note);
+            cJSON* list = cJSON_AddArrayToObject(go, "settings");
+            for (const SettingDef& d : g.defs)
+                if (settings::applies(d, bank))
+                    cJSON_AddItemToArray(list, setting_to_cjson(d, bank));
+            cJSON_AddItemToArray(groups, go);
+        }
+    }
+    send_json(req, HTTP_OK, cjson_print(root.p));
+}
+
+void HttpServer::handle_settings_change(evhttp_request* req) {
+    if (!control_enabled_) {
+        send_json(req, 403, "{\"error\":\"control is disabled in the config\"}");
         return;
     }
-    // The poller picks it up on its next tick; the outcome shows up in
-    // api/live as "last_command".
-    send_json(req, 202, "{\"queued\":true}");
+    const Query q(req);
+    const InverterView* v = pick(req, q.str("inverter"));
+    if (!v) return;
+
+    // No body to carry the password, and a URL ends up in logs. A PUT with
+    // this header is not a "simple" cross-origin request either, so a
+    // foreign page cannot send it without a CORS preflight, which is not served.
+    const auto password = basic_auth_password(
+        evhttp_find_header(evhttp_request_get_input_headers(req), "Authorization"));
+    if (!authorize(req, password ? password->c_str() : nullptr, "settings change", *v)) return;
+
+    const auto bad = [&](int code, const std::string& error) {
+        CJsonPtr o(cJSON_CreateObject());
+        cJSON_AddStringToObject(o.p, "error", error.c_str());
+        send_json(req, code, cjson_print(o.p));
+    };
+    if (!v->model.has_settings()) {
+        bad(HTTP_NOTFOUND, "this inverter model has no settings");
+        return;
+    }
+    // A change is worked out from the settings as last read; nothing is
+    // read for it.
+    const InverterSnapshot snap = v->state.snapshot();
+    if (!snap.connected) {
+        bad(HTTP_SERVUNAVAIL, "logger not connected");
+        return;
+    }
+    if (!snap.settings) {
+        bad(HTTP_SERVUNAVAIL, "the settings have not been read from the inverter yet");
+        return;
+    }
+
+    // The settings as they will be after the change.
+    RegisterBank want = *snap.settings;
+    std::string names;
+    for (const evkeyval* kv = q.params.tqh_first; kv; kv = kv->next.tqe_next) {
+        const std::string name = kv->key;
+        if (name == "inverter") continue;
+        const SettingRef ref = v->model.find_setting(name);
+        if (!ref || !settings::applies(*ref.def, *snap.settings)) {
+            bad(HTTP_BADREQUEST, name + ": no such setting");
+            return;
+        }
+        std::string error;
+        if (!settings::set(*ref.def, kv->value, want, error)) {
+            bad(HTTP_BADREQUEST, name + ": " + error);
+            return;
+        }
+        names += (names.empty() ? "" : " ") + name + "=" + kv->value;
+    }
+    if (names.empty()) {
+        bad(HTTP_BADREQUEST, "no settings to change");
+        return;
+    }
+    // Whether the settings would still agree with each other.
+    if (const std::string why = settings::check(v->model.setting_groups, want); !why.empty()) {
+        bad(HTTP_BADREQUEST, why);
+        return;
+    }
+    spdlog::info("http: settings for {}: {}", v->cfg.name, names);
+
+    // Only the registers that differ are written, each run of neighbours
+    // with one request.
+    const std::vector<RegisterWrite> writes =
+        settings::changes(*snap.settings, want, v->model.settings);
+    if (writes.empty()) {
+        send_json(req, HTTP_OK, "{\"changed\":false}");   // the inverter holds all of it already
+        return;
+    }
+
+    // The answer waits for the poller: it comes when the change is written
+    // and the settings are read again, so api/settings already shows what
+    // the inverter holds by then. The poller calls `done` on its thread;
+    // the request is answered here, on the HTTP thread.
+    struct Outcome {
+        evhttp_request* req;
+        std::string     error;
+    };
+    SettingsChange change;
+    change.writes = writes;
+    change.done   = [base = base_, req](const std::string& error) {
+        event_base_once(base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg) {
+            const std::unique_ptr<Outcome> o(static_cast<Outcome*>(arg));
+            if (o->error.empty()) {
+                send_json(o->req, HTTP_OK, "{\"changed\":true}");
+                return;
+            }
+            CJsonPtr body(cJSON_CreateObject());
+            cJSON_AddStringToObject(body.p, "error", o->error.c_str());
+            send_json(o->req, 502, cjson_print(body.p));
+        }, new Outcome{req, error}, nullptr);
+    };
+    if (!v->state.request_settings(std::move(change))) {
+        bad(HTTP_SERVUNAVAIL, "an earlier settings change is not over yet");
+        return;
+    }
+    for (const RegisterWrite& w : writes) {
+        std::string was, now;
+        for (size_t i = 0; i < w.values.size(); ++i) {
+            was += (i ? " " : "") + std::to_string(snap.settings->u16(w.addr + i));
+            now += (i ? " " : "") + std::to_string(w.values[i]);
+        }
+        spdlog::warn("control {}: settings: writing regs {}+{}: [{}] -> [{}]",
+                     v->cfg.name, w.addr, w.values.size(), was, now);
+    }
 }

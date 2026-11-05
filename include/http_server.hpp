@@ -31,13 +31,18 @@ struct InverterView {
 //   GET api/info?inverter                 logger / inverter identity, poll stats
 //   GET api/history?inverter&time_start&time_end&count   decimated samples
 //   GET api/daily?inverter&year&month     daily energy of one month; inverter=all sums
-//   POST api/command {"inverter", "name"} queue an inverter command (if enabled)
+//   GET api/settings?inverter             every setting of the inverter: what it
+//                                         is, how to draw it and its value
+//   PUT api/settings?inverter&<name>=<value>&...   change the named settings
+//                                         (if enabled); no body, the password
+//                                         goes in an Authorization: Basic header
 //
 // `inverter` is a section title from the config; without it, the first one.
 //   anything else                         static file under www_root
 //
-// Requests only read what the poller has stored; a command is queued and
-// its outcome later shows up in api/live.
+// Requests only read what the poller has stored. A settings change is
+// checked here and left for the poller, which writes it and reads the
+// settings again; the request is answered after that, with what came of it.
 //
 // The pages use relative URLs, so the service also works behind a reverse
 // proxy that mounts it under a path prefix.
@@ -63,7 +68,10 @@ private:
     void handle_info(struct evhttp_request* req);
     void handle_history(struct evhttp_request* req);
     void handle_daily(struct evhttp_request* req);
-    void handle_command(struct evhttp_request* req);
+    void handle_settings(struct evhttp_request* req);
+    void handle_settings_change(struct evhttp_request* req);
+    bool authorize(struct evhttp_request* req, const char* password,
+                   const char* what, const InverterView& v);
     void serve_file(struct evhttp_request* req, const std::string& path);
     static void send_json(struct evhttp_request* req, int code, std::string body);
 

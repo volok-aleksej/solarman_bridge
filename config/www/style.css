@@ -411,11 +411,6 @@ canvas { display: block; width: 100%; }
 .flow-center circle.on  { stroke: #1a7f37; }
 .flow-center circle.off { stroke: #cf222e; }
 .flow-center text       { font-size: 15px; font-weight: bold; fill: #1f2328; }
-.flow-center circle     { transition: stroke .15s ease, filter .15s ease; }
-.flow-center.clickable  { cursor: pointer; }
-/* A clickable button lights up on hover: brighter ring with a glow. */
-.flow-center.clickable:hover circle.on  { stroke: #2fd35a; filter: drop-shadow(0 0 6px #2fd35a); }
-.flow-center.clickable:hover circle.off { stroke: #ff4d5e; filter: drop-shadow(0 0 6px #ff4d5e); }
 
 .flow-node text   { text-anchor: middle; fill: #1f2328; }
 .fn-icon          { font-size: 34px; }
@@ -489,3 +484,51 @@ canvas { display: block; width: 100%; }
 }
 .pw-buttons button.primary { background: #1a7f37; border-color: #1a7f37; color: #ffffff; }
 .pw-buttons button:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Settings ────────────────────────────────────────────── */
+
+.settings-table { min-width: 0; }
+.settings-table td { vertical-align: middle; }
+.settings-table input[type=number], .settings-table select {
+  font: inherit;
+  width: 90px;
+  padding: 3px 6px;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  text-align: right;
+  background: #ffffff;
+}
+.settings-table select { width: auto; text-align: left; }
+.settings-table input[type=checkbox] { width: 16px; height: 16px; vertical-align: middle; }
+.settings-table input.changed, .settings-table select.changed { border-color: #bf8700; background: #fff8c5; }
+.settings-table input[type=checkbox].changed { outline: 2px solid #bf8700; outline-offset: 1px; }
+.settings-table input.bad { border-color: #cf222e; background: #fff8f8; }
+.settings-table .unit {
+  display: inline-block;
+  width: 20px;
+  margin-left: 4px;
+  color: #57606a;
+  font-size: 12px;
+  text-align: left;
+}
+.settings-note { padding: 8px 0 0; max-width: 640px; }
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 0 16px 16px;
+  font-size: 12px;
+}
+.settings-actions button {
+  font: inherit;
+  padding: 4px 12px;
+  border-radius: 4px;
+  border: 1px solid #d0d7de;
+  background: #f6f8fa;
+  cursor: pointer;
+}
+.settings-error { color: #cf222e; }
+.settings-actions button.primary { background: #1a7f37; border-color: #1a7f37; color: #ffffff; }
+.settings-actions button:disabled { opacity: 0.5; cursor: default; }

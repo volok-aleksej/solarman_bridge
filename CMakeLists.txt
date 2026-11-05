@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(solarman_bridge
-    VERSION 1.2.0
+    VERSION 2.0.0
     LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -59,6 +59,7 @@ target_link_libraries(solarman_bridge PRIVATE solarman_core)
 
 include(GNUInstallDirs)
 install(TARGETS solarman_bridge RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(PROGRAMS scripts/solarman_bridge_passwd DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES config/solarman_bridge.conf
         RENAME solarman_bridge.conf.template
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/solarman_bridge)

@@ -40,3 +40,19 @@ TEST(LoginGuard, SuccessResetsTheCount) {
     g.failed(t);
     EXPECT_FALSE(g.locked(t));
 }
+
+TEST(BasicAuth, GivesThePasswordOfTheHeader) {
+    // base64 of ":secret", "admin:secret" and "u:a:b"
+    EXPECT_EQ(basic_auth_password("Basic OnNlY3JldA=="), "secret");
+    EXPECT_EQ(basic_auth_password("Basic YWRtaW46c2VjcmV0"), "secret");
+    EXPECT_EQ(basic_auth_password("Basic dTphOmI="), "a:b");
+    EXPECT_EQ(basic_auth_password("Basic Og=="), "");
+}
+
+TEST(BasicAuth, RejectsEverythingElse) {
+    EXPECT_FALSE(basic_auth_password(nullptr));
+    EXPECT_FALSE(basic_auth_password(""));
+    EXPECT_FALSE(basic_auth_password("Bearer OnNlY3JldA=="));
+    EXPECT_FALSE(basic_auth_password("Basic c2VjcmV0"));      // "secret": no colon
+    EXPECT_FALSE(basic_auth_password("Basic OnNl*3JldA=="));  // not base64
+}

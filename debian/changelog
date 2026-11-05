@@ -1,3 +1,23 @@
+solarman-bridge (2.0.0) stable; urgency=medium
+
+  * Settings tab: the inverter's own settings, shown and changed from the
+    page. Three groups for deye_sg04lp3: Time of use (power, SOC or voltage
+    and charge sources, one value for all six windows), Charge & signals,
+    Battery limits. Which settings there are follows the battery mode.
+  * API: GET api/settings returns every setting with its description and
+    value; PUT api/settings?<name>=<value>&... changes the named ones, with
+    the password in an Authorization: Basic header. The request is answered
+    when the change is written and the settings are read again.
+  * solarman_bridge_passwd sets the password for changes: it asks for one
+    (or makes a random one with -g), writes its hash to the config and
+    restarts the service.
+  * The command that switched the inverter on and off is gone, with
+    POST api/command and the power button on the diagram.
+  * A model is a list of register blocks with their decoders and of
+    settings; the poller sends one batch of requests per tick.
+
+ -- Alexey Volokitin <elenaluk89@gmail.com>  Thu, 05 Nov 2026 00:00:00 +0200
+
 solarman-bridge (1.2.0) stable; urgency=medium
 
   * Inverter commands need a password: control { password_hash } holds its

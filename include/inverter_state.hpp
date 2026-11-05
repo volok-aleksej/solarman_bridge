@@ -1,15 +1,16 @@
 #pragma once
 
 #include "inverter_data.hpp"
-#include "inverter_commands.hpp"
+#include "inverter_settings.hpp"
 
 #include <chrono>
 #include <cstdint>
-#include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 struct PollStats {
     uint64_t cycles_ok     = 0;
@@ -20,11 +21,13 @@ struct PollStats {
     std::chrono::system_clock::time_point last_error_at{};
 };
 
-// Outcome of the last inverter command.
-struct CommandStatus {
-    std::string   name;
-    CommandResult result;
-    std::chrono::system_clock::time_point at;
+// A settings change the HTTP side leaves for the poller.
+struct SettingsChange {
+    std::vector<RegisterWrite> writes;
+    // Called by the poller, on its thread, when the change is over: with ""
+    // when all of it is written and the settings are read again, otherwise
+    // with the reason.
+    std::function<void(const std::string& error)> done;
 };
 
 // Snapshot of everything the poller has learned about the inverter.
@@ -33,12 +36,14 @@ struct InverterSnapshot {
     std::optional<InverterIdentity> identity;
     std::optional<InverterSample>   sample;
     std::optional<InverterClock>    clock;
-    std::optional<CommandStatus>    last_command;
+    // The model's settings registers as last read from the inverter.
+    std::optional<RegisterBank>     settings;
+    std::chrono::system_clock::time_point settings_at{};
     PollStats stats;
 };
 
 // Written by the poller on the dispatcher thread, read by the HTTP thread.
-// The HTTP thread also leaves commands here for the poller to pick up.
+// The HTTP thread also leaves settings changes here for the poller to write.
 class InverterState {
 public:
     // Called on every tick; acts on changes only. `error` is why the link
@@ -81,24 +86,27 @@ public:
         snap_.stats.last_error_at = std::chrono::system_clock::now();
     }
 
-    // HTTP thread. False when kMaxPendingCommands are already waiting.
-    bool request_command(const InverterCommand& cmd) {
+    void set_settings(RegisterBank bank) {
         std::lock_guard<std::mutex> lk(mtx_);
-        if (pending_.size() >= kMaxPendingCommands) return false;
-        pending_.push_back(&cmd);
+        snap_.settings    = std::move(bank);
+        snap_.settings_at = std::chrono::system_clock::now();
+        settings_changing_ = false;
+    }
+
+    // HTTP thread: registers to write. False while an earlier change is
+    // not written and read back yet.
+    bool request_settings(SettingsChange change) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (pending_settings_ || settings_changing_) return false;
+        pending_settings_ = std::move(change);
         return true;
     }
 
-    // Poller: the commands requested since the last call.
-    std::deque<const InverterCommand*> take_commands() {
+    // Poller: the change requested since the last call, if any.
+    std::optional<SettingsChange> take_settings() {
         std::lock_guard<std::mutex> lk(mtx_);
-        return std::exchange(pending_, {});
-    }
-
-    void set_command(std::string name, CommandResult r) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        snap_.last_command = CommandStatus{std::move(name), std::move(r),
-                                           std::chrono::system_clock::now()};
+        if (pending_settings_) settings_changing_ = true;
+        return std::exchange(pending_settings_, std::nullopt);
     }
 
     InverterSnapshot snapshot() const {
@@ -107,9 +115,8 @@ public:
     }
 
 private:
-    static constexpr size_t kMaxPendingCommands = 4;
-
     mutable std::mutex mtx_;
     InverterSnapshot snap_;
-    std::deque<const InverterCommand*> pending_;
+    std::optional<SettingsChange> pending_settings_;
+    bool settings_changing_ = false;   // taken by the poller, not read again yet
 };

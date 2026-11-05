@@ -30,9 +30,9 @@ struct HistoryConfig {
 };
 
 struct ControlConfig {
-    // Lets POST api/command write to the inverter. Off unless set.
+    // Lets PUT api/settings write to the inverter. Off unless set.
     bool enabled = false;
-    // crypt(3) hash of the password every command must carry, as printed
+    // crypt(3) hash of the password every change must carry, as printed
     // by `openssl passwd -6`. Required when enabled.
     std::string password_hash;
 };
