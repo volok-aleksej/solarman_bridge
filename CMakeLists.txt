@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(solarman_bridge
-    VERSION 1.2.0
+    VERSION 2.0.0
     LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
