@@ -2,6 +2,7 @@
 
 #include "config.hpp"
 #include "inverter_model.hpp"
+#include "inverter_state.hpp"
 #include "timer.hpp"
 #include "v5_client.hpp"
 
@@ -15,7 +16,6 @@
 
 class Dispatcher;
 class History;
-class InverterState;
 
 // Polls one inverter through its logger and writes its settings.
 //
@@ -55,6 +55,8 @@ private:
         std::string       error;                // first failure of the cycle, empty if none
         std::optional<RegisterBank> settings;   // the settings registers, when the batch
                                                 // reads them; dropped when a read fails
+        SettingsChange    change;               // the settings change of the batch, if any
+        std::string       change_error;         // its first failure, empty if none
     };
 
     // The answer to one request of the batch, or why there is none.

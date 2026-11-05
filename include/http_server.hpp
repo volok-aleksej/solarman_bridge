@@ -40,9 +40,9 @@ struct InverterView {
 // `inverter` is a section title from the config; without it, the first one.
 //   anything else                         static file under www_root
 //
-// Requests only read what the poller has stored; a settings change is
-// checked, queued and done by the poller, which then reads the settings
-// back for api/settings.
+// Requests only read what the poller has stored. A settings change is
+// checked here and left for the poller, which writes it and reads the
+// settings again; the request is answered after that, with what came of it.
 //
 // The pages use relative URLs, so the service also works behind a reverse
 // proxy that mounts it under a path prefix.

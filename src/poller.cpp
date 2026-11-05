@@ -71,9 +71,11 @@ void Poller::on_tick() {
     } else {
         // A change is not kept for later: the settings it was worked out
         // from will be old by then.
-        if (state_.take_settings())
+        if (auto change = state_.take_settings()) {
             spdlog::warn("control {}: {}: not written: logger not connected",
                          cfg_.name, kSettings);
+            if (change->done) change->done("logger not connected");
+        }
         settings_read_at_.reset();   // read them as soon as the link is back
     }
     client_.tick();
@@ -98,10 +100,12 @@ void Poller::start_batch() {
 
     if (model_.has_settings()) {
         // A change, and then the settings as the inverter holds them after it.
-        const auto writes = state_.take_settings();
-        if (writes)
-            for (const RegisterWrite& w : *writes) write_settings(w);
-        if (writes || !settings_read_at_ ||
+        auto change = state_.take_settings();
+        if (change) {
+            batch_->change = std::move(*change);
+            for (const RegisterWrite& w : batch_->change.writes) write_settings(w);
+        }
+        if (change || !settings_read_at_ ||
             batch_->start - *settings_read_at_ >= kSettingsRefresh) {
             // Stamped before the answer: a failed read is retried after the same pause.
             settings_read_at_ = batch_->start;
@@ -145,17 +149,18 @@ void Poller::read_block(RegisterBlock& b, bool identity) {
     });
 }
 
-// What comes of a write goes to the log only; the page sees the settings
-// as they are read after it.
+// `w` is a write of the batch's change and lives as long as the batch.
 void Poller::write_settings(const RegisterWrite& w) {
     request(modbus::build_write_multiple(cfg_.slave_id, w.addr, w.values),
-            [this, w](bool ok, const std::vector<uint8_t>& mb, const std::string& e) {
+            [this, &w](bool ok, const std::vector<uint8_t>& mb, const std::string& e) {
         std::string err = e;
-        if (ok && modbus::parse_write_multiple(mb, cfg_.slave_id, w.addr, w.values.size(), err))
+        if (ok && modbus::parse_write_multiple(mb, cfg_.slave_id, w.addr, w.values.size(), err)) {
             spdlog::info("control {}: {}: {} written", cfg_.name, kSettings, block_name(w));
-        else
-            spdlog::warn("control {}: {}: {} not written: {}", cfg_.name, kSettings,
-                         block_name(w), err);
+            return;
+        }
+        err = block_name(w) + " not written: " + err;
+        spdlog::warn("control {}: {}: {}", cfg_.name, kSettings, err);
+        if (batch_->change_error.empty()) batch_->change_error = err;
     });
 }
 
@@ -188,7 +193,15 @@ void Poller::finish_batch() {
     Batch b = std::move(*batch_);
     batch_.reset();
 
-    if (b.settings) state_.set_settings(std::move(*b.settings));
+    const bool settings_read = b.settings.has_value();
+    if (settings_read) state_.set_settings(std::move(*b.settings));
+    // Whoever asked for the change is told what came of it, after the
+    // state has the settings as the inverter holds them now.
+    if (b.change.done) {
+        if (b.change_error.empty() && !settings_read)
+            b.change_error = "written, but the settings could not be read after it";
+        b.change.done(b.change_error);
+    }
 
     if (!b.error.empty()) {
         // A lost link is logged by the client; only cycle errors here.

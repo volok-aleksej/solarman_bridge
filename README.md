@@ -49,7 +49,7 @@ model does not have stay 0.
 | `api/history?inverter=&time_start=&time_end=&count=` | samples oldest first (unix seconds; decimated to `count` buckets, max 2000) |
 | `api/daily?inverter=&year=&month=` | daily energy rows for one month; `inverter=all` sums all |
 | `GET api/settings?inverter=` | every setting of the inverter, in groups: name, label, kind, unit, limits, value |
-| `PUT api/settings?inverter=&<name>=<value>&...` | queues a change of the named settings; no body; `GET api/settings` shows what the inverter holds afterwards |
+| `PUT api/settings?inverter=&<name>=<value>&...` | changes the named settings; no body; answers when the change is written and the settings are read again |
 
 `inverter` is a section title; without it the first inverter is used.
 
@@ -87,13 +87,20 @@ in one request and nothing else: there is no body and no GET of a single
 setting. Values are numbers in the setting's unit (`47.5`), `true` / `false`
 (or `1` / `0`) for a flag, the index for a choice. A name that does not
 exist in the current battery mode, a read-only setting and a value off its
-range or step are refused with 400 and nothing is queued; so is a change
+range or step are refused with 400 and nothing is written; so is a change
 after which the settings would not agree with each other (shutdown, low
-battery and restart levels in order). An accepted change is answered with
-202, or with 200 when the inverter holds all of it already. Whether the
-inverter took it is not reported: the service reads the settings again
-after the writes and `GET api/settings` shows what the inverter holds; a
-failure is in the log.
+battery and restart levels in order).
+
+The request is answered when the change is over, a few seconds later:
+
+| Code | Meaning |
+|---|---|
+| 200 `{"changed":true}` | every register is written and the settings are read again: `GET api/settings` shows what the inverter holds now |
+| 200 `{"changed":false}` | the inverter held these values already, nothing is written |
+| 400 | refused before anything is written, with the reason |
+| 401, 429 | wrong password; too many of them |
+| 502 | a write failed, or the settings could not be read after it; the reason names the registers. Other registers of the change may have been written |
+| 503 | the logger is not connected, the settings are not read yet, or an earlier change is not over |
 
 A change needs the control password, sent as `Authorization: Basic` (the
 user name is ignored).

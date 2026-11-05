@@ -21,6 +21,7 @@
 #include <ctime>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <stdexcept>
 
 namespace {
@@ -541,10 +542,33 @@ void HttpServer::handle_settings_change(evhttp_request* req) {
     const std::vector<RegisterWrite> writes =
         settings::changes(*snap.settings, want, v->model.settings);
     if (writes.empty()) {
-        send_json(req, HTTP_OK, "{\"queued\":false}");   // the inverter holds all of it already
+        send_json(req, HTTP_OK, "{\"changed\":false}");   // the inverter holds all of it already
         return;
     }
-    if (!v->state.request_settings(writes)) {
+
+    // The answer waits for the poller: it comes when the change is written
+    // and the settings are read again, so api/settings already shows what
+    // the inverter holds by then. The poller calls `done` on its thread;
+    // the request is answered here, on the HTTP thread.
+    struct Outcome {
+        evhttp_request* req;
+        std::string     error;
+    };
+    SettingsChange change;
+    change.writes = writes;
+    change.done   = [base = base_, req](const std::string& error) {
+        event_base_once(base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg) {
+            const std::unique_ptr<Outcome> o(static_cast<Outcome*>(arg));
+            if (o->error.empty()) {
+                send_json(o->req, HTTP_OK, "{\"changed\":true}");
+                return;
+            }
+            CJsonPtr body(cJSON_CreateObject());
+            cJSON_AddStringToObject(body.p, "error", o->error.c_str());
+            send_json(o->req, 502, cjson_print(body.p));
+        }, new Outcome{req, error}, nullptr);
+    };
+    if (!v->state.request_settings(std::move(change))) {
         bad(HTTP_SERVUNAVAIL, "an earlier settings change is not over yet");
         return;
     }
@@ -557,7 +581,4 @@ void HttpServer::handle_settings_change(evhttp_request* req) {
         spdlog::warn("control {}: settings: writing regs {}+{}: [{}] -> [{}]",
                      v->cfg.name, w.addr, w.values.size(), was, now);
     }
-    // The poller writes them on its next tick and reads the settings again
-    // after that; api/settings then shows what the inverter holds.
-    send_json(req, 202, "{\"queued\":true}");
 }

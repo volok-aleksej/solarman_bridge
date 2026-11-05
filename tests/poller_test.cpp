@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <optional>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -404,9 +405,8 @@ struct FakeInverter {
     }
 };
 
-// What a settings change comes to is not reported anywhere but the log, so
-// the tests look at what the inverter holds and at the settings as the
-// poller has read them.
+// The tests look at what the inverter holds, at the settings as the poller
+// has read them and at what the poller tells whoever asked for the change.
 class PollerSettingsTest : public ::testing::Test {
 protected:
     using Over = std::function<bool(const InverterSnapshot&)>;
@@ -446,8 +446,9 @@ protected:
                 if (!snap.settings) return;
                 submitted = true;
                 if (!writes.empty()) {
-                    EXPECT_TRUE(state.request_settings(writes));
-                    EXPECT_FALSE(state.request_settings(writes));   // one at a time
+                    const auto done = [this](const std::string& error) { outcome_ = error; };
+                    EXPECT_TRUE(state.request_settings({writes, done}));
+                    EXPECT_FALSE(state.request_settings({writes, done}));   // one at a time
                 }
             } else if (linger < 0) {
                 if (over(snap)) { came = true; linger = linger_ms / 10; }
@@ -461,6 +462,7 @@ protected:
     }
 
     std::string db_;
+    std::optional<std::string> outcome_;   // what the poller said of the change, once over
 };
 
 // Three poll periods: time enough for a change to do whatever it does.
@@ -497,6 +499,7 @@ TEST_F(PollerSettingsTest, SettingsChangeWritesEveryRunAndReadsAfter) {
     }, kSettle));
     EXPECT_EQ(inv.written, (std::vector<uint16_t>{154, 166}));
     EXPECT_EQ(inv.settings_reads, 2);
+    EXPECT_EQ(outcome_, std::string());                // told that it is done
     for (int i = 0; i < 6; ++i) {
         EXPECT_EQ(inv.setting(154 + i), 4000);
         EXPECT_EQ(inv.setting(166 + i), 30);
@@ -538,6 +541,8 @@ TEST_F(PollerSettingsTest, SettingsWritesRefusedByTheInverterAreNotRepeated) {
         return inv.writes >= 2 && inv.settings_reads >= 2;   // refused, then read anew
     }, kSettle));
     EXPECT_EQ(inv.written, (std::vector<uint16_t>{154, 108}));
+    ASSERT_TRUE(outcome_);                             // told why, by the first failure
+    EXPECT_EQ(outcome_->rfind("regs 154+6 not written: ", 0), 0u) << *outcome_;
     EXPECT_EQ(inv.setting(154), 6000);
     EXPECT_EQ(state.snapshot().settings->u16(154), 6000);
 }
@@ -580,10 +585,10 @@ TEST_F(PollerSettingsTest, NextSettingsChangeWaitsForTheReadAfterThisOne) {
         const auto snap = state.snapshot();
         if (step == 0 && snap.settings) {
             step = 1;
-            EXPECT_TRUE(state.request_settings({{108, {60}}}));
+            EXPECT_TRUE(state.request_settings(SettingsChange{{{108, {60}}}, {}}));
         } else if (step == 1) {
             // Tried on every tick: taken only once the first one shows.
-            if (state.request_settings({{109, {120}}})) {
+            if (state.request_settings(SettingsChange{{{109, {120}}}, {}})) {
                 EXPECT_EQ(snap.settings->u16(108), 60);
                 step = 2;
             } else {

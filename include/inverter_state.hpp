@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -18,6 +19,15 @@ struct PollStats {
     int64_t  last_cycle_ms = 0;   // duration of the last successful cycle
     std::string last_error;
     std::chrono::system_clock::time_point last_error_at{};
+};
+
+// A settings change the HTTP side leaves for the poller.
+struct SettingsChange {
+    std::vector<RegisterWrite> writes;
+    // Called by the poller, on its thread, when the change is over: with ""
+    // when all of it is written and the settings are read again, otherwise
+    // with the reason.
+    std::function<void(const std::string& error)> done;
 };
 
 // Snapshot of everything the poller has learned about the inverter.
@@ -85,15 +95,15 @@ public:
 
     // HTTP thread: registers to write. False while an earlier change is
     // not written and read back yet.
-    bool request_settings(std::vector<RegisterWrite> writes) {
+    bool request_settings(SettingsChange change) {
         std::lock_guard<std::mutex> lk(mtx_);
         if (pending_settings_ || settings_changing_) return false;
-        pending_settings_ = std::move(writes);
+        pending_settings_ = std::move(change);
         return true;
     }
 
     // Poller: the change requested since the last call, if any.
-    std::optional<std::vector<RegisterWrite>> take_settings() {
+    std::optional<SettingsChange> take_settings() {
         std::lock_guard<std::mutex> lk(mtx_);
         if (pending_settings_) settings_changing_ = true;
         return std::exchange(pending_settings_, std::nullopt);
@@ -107,6 +117,6 @@ public:
 private:
     mutable std::mutex mtx_;
     InverterSnapshot snap_;
-    std::optional<std::vector<RegisterWrite>> pending_settings_;
+    std::optional<SettingsChange> pending_settings_;
     bool settings_changing_ = false;   // taken by the poller, not read again yet
 };
