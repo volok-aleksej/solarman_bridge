@@ -7,13 +7,11 @@ const API = {
   info:    'api/info',
   history: 'api/history',
   daily:   'api/daily',
-  command:   'api/command',
+  settings:  'api/settings',
   inverters: 'api/inverters',
 };
 
 const LIVE_POLL_MS = 1000;
-// How long the page waits for a queued command's outcome.
-const CMD_WAIT_MS  = 30000;
 // Below this a flow line is drawn idle: sensors read a few watts at rest.
 const FLOW_MIN_W   = 20;
 
@@ -24,7 +22,9 @@ const RT_TABS = [
   { id: 'grid', label: 'Grid' },
   { id: 'load', label: 'Load' },
 ];
-const TABS = ['realtime', 'history', 'energy', 'info'];
+const TABS = ['realtime', 'history', 'energy', 'settings', 'info'];
+// How often the open Settings tab re-reads what the inverter holds.
+const SETTINGS_POLL_MS = 5000;
 
 // ── Chart.js helpers ──────────────────────────────────────────────────────────
 // Chart instances live outside the Alpine component on purpose: Alpine's deep
@@ -184,9 +184,17 @@ function inverter() {
     energyTab:    'batt',
     rtTab:        'batt',
     RT_TABS,
-    cmdBusy:      false,
-    cmdStatus:    '',
-    pw:           { open: false, cmd: null, value: '', error: '', busy: false },
+    applyError:   '',      // why the service refused the last change
+    pw:           { open: false, act: null, value: '', error: '', busy: false },
+
+    // api/settings as received, and what the inputs hold: name -> value, a
+    // string for numbers and choices, a boolean for flags. `seen` is the
+    // same as last received, to tell an edited input from a refreshed one.
+    settings:       { groups: [], control: false, known: false },
+    settingsStatus: '',
+    setGroup:       '',
+    form:           {},
+    seen:           {},
 
     inverters:      [],   // from api/inverters
     inverter:       '',   // selected name; '' until the list is loaded
@@ -206,7 +214,10 @@ function inverter() {
       this.energyInverter = name;
       this.live      = {};
       this.info      = null;
-      this.cmdStatus = '';
+      this.applyError = '';
+      this.settings  = { groups: [], control: false, known: false };
+      this.form      = {};
+      this.seen      = {};
       this.loadInfo();
       this.openTab(this.tab);
     },
@@ -227,6 +238,7 @@ function inverter() {
       this.tab = t;
       if (t === 'history') this.loadHistory();
       if (t === 'energy')  this.loadEnergy();
+      if (t === 'settings') this.loadSettings();
       if (t === 'info')    this.loadInfo();
     },
 
@@ -252,6 +264,9 @@ function inverter() {
         const intervalMs = Math.max(10000, this.histHours * 6000);
         if (Date.now() - this._histLastLoad >= intervalMs) this.loadHistory();
       }, 1000);
+      setInterval(() => {
+        if (this.tab === 'settings' && !this.pw.open) this.loadSettings();
+      }, SETTINGS_POLL_MS);
     },
 
     // ── formatting ───────────────────────────────────────────────────────────
@@ -333,19 +348,6 @@ function inverter() {
       }
       return [];
     },
-
-    canControl() {
-      return !!(this.info && this.info.control.enabled) && !this.cmdBusy;
-    },
-
-    // The centre button switches the inverter, when control is enabled.
-    toggleInverter() {
-      if (!this.canControl()) return;
-      const name = this.live.running ? 'power_off' : 'power_on';
-      const c = this.info.control.commands.find(c => c.name === name);
-      if (c) this.runCommand(c);
-    },
-
 
     _startLivePolling() {
       let busy = false;
@@ -601,64 +603,137 @@ function inverter() {
       } catch (_) {}
     },
 
-    // Labels of the commands the control block offers, by API name.
-    cmdLabel(name) {
-      return { power_on: 'Turn on', power_off: 'Turn off' }[name] || name;
-    },
-
-    // The command is only queued here; its outcome arrives with api/live
-    // as a new last_command.
-    // The power button opens the password dialog; the command goes out
-    // from there, with the password, which the page does not keep.
-    runCommand(c) {
-      this.pw = { open: true, cmd: c, value: '', error: '', busy: false };
+    // A settings change goes through the password dialog. The page does not
+    // keep the password. act = { label, text, send(password) -> fetch promise }.
+    askPassword(act) {
+      this.pw = { open: true, act, value: '', error: '', busy: false };
       this.$nextTick(() => { const el = document.getElementById('pw-input'); if (el) el.focus(); });
     },
 
-    closePassword() { this.pw.open = false; this.pw.value = ''; },
+    // Not while a change is on its way: it cannot be called back.
+    closePassword() {
+      if (this.pw.busy) return;
+      this.pw.open  = false;
+      this.pw.value = '';
+    },
 
     async submitPassword() {
-      const c = this.pw.cmd;
-      const prevAt = this.live.last_command ? this.live.last_command.at : 0;
+      const act = this.pw.act;
       this.pw.busy  = true;
       this.pw.error = '';
+      this.applyError = '';
       let r;
       try {
-        r = await fetch(API.command, {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ inverter: this.inverter, name: c.name, password: this.pw.value }),
-        });
+        r = await act.send(this.pw.value);
       } catch (e) {
         this.pw.error = e.message;
         this.pw.busy  = false;
         return;
       }
       this.pw.busy = false;
-      if (r.status !== 202) {
+      if (r.status === 401 || r.status === 429) {
         // Wrong password and the lockout keep the dialog open to retry.
         this.pw.error = (await r.json()).error;
         this.pw.value = '';
         return;
       }
       this.closePassword();
+      // The service answers when the change is over: written and the
+      // settings read again, or refused, or failed on the way. Anything but
+      // 200 leaves the edits in place, with the reason next to the buttons.
+      if (r.status !== 200) this.applyError = (await r.json()).error;
+      // 200: the inputs follow the inverter again. Otherwise only the
+      // values are refreshed, in case a part of the change did get there.
+      await this.loadSettings(r.status === 200);
+    },
 
-      this.cmdBusy   = true;
-      this.cmdStatus = `${this.cmdLabel(c.name)}: queued…`;
-      const t0 = Date.now();
-      while (Date.now() - t0 < CMD_WAIT_MS) {
-        await new Promise(res => setTimeout(res, LIVE_POLL_MS));
-        const lc = this.live.last_command;
-        if (lc && lc.at !== prevAt) {
-          this.cmdStatus = lc.ok
-            ? `${this.cmdLabel(lc.name)}: done (register ${lc.before} → ${lc.after})`
-            : `${this.cmdLabel(lc.name)}: failed: ${lc.error}`;
-          this.cmdBusy = false;
-          return;
+    // ── settings ─────────────────────────────────────────────────────────────
+
+    // Every setting of the answer, whichever group it is in.
+    allSettings(groups) {
+      return (groups || this.settings.groups).flatMap(g => g.settings);
+    },
+
+    // An input's value for a setting's value.
+    formValue(s) { return s.kind === 'flag' ? s.value : String(s.value); },
+
+    // reset: drop the edits as well. Otherwise an input the user has
+    // changed keeps its value and the rest follow the inverter.
+    async loadSettings(reset) {
+      const name = this.inverter;
+      try {
+        const r = await fetch(`${API.settings}?${this.invQ()}`);
+        if (!r.ok) throw new Error(r.status);
+        const j = await r.json();
+        if (name !== this.inverter) return;   // switched meanwhile
+        const form = {}, seen = {};
+        for (const s of this.allSettings(j.groups)) {
+          const v = this.formValue(s);
+          const edited = !reset && s.name in this.form && this.form[s.name] !== this.seen[s.name];
+          form[s.name] = edited ? this.form[s.name] : v;
+          seen[s.name] = v;
         }
+        this.form = form;
+        this.seen = seen;
+        this.settings = j;
+        if (!j.groups.some(g => g.id === this.setGroup))
+          this.setGroup = j.groups.length ? j.groups[0].id : '';
+        this.settingsStatus = !j.known ? 'not read from the inverter yet'
+          : `read ${Math.round(j.age_ms / 1000)} s ago`;
+      } catch (e) {
+        this.settingsStatus = 'error: ' + e.message;
       }
-      this.cmdStatus = 'no outcome reported';
-      this.cmdBusy = false;
+    },
+
+    // Read-only text of a setting.
+    shown(s) {
+      switch (s.kind) {
+        case 'flag':   return s.value ? 'on' : 'off';
+        case 'choice': return s.choices[s.value] !== undefined ? s.choices[s.value] : String(s.value);
+        case 'number': return s.value + (s.unit ? ' ' + s.unit : '');
+        default:       return String(s.value);
+      }
+    },
+
+    canWrite()  { return this.settings.control; },
+    editable(s) { return !!s.writable && this.settings.control; },
+    changed(s)  { return this.editable(s) && this.form[s.name] !== this.seen[s.name]; },
+
+    // A number the inverter would not take: off its range or its step.
+    bad(s) {
+      if (s.kind !== 'number' || !this.changed(s)) return false;
+      const text = String(this.form[s.name]).trim();
+      const v = Number(text);
+      if (text === '' || !Number.isFinite(v) || v < s.min || v > s.max) return true;
+      const steps = v / s.step;
+      return Math.abs(steps - Math.round(steps)) > 1e-6;
+    },
+
+    changes()       { return this.allSettings().filter(s => this.changed(s)); },
+    groupChanges(g) { return this.allSettings([g]).some(s => this.changed(s)); },
+    canApply() {
+      const c = this.changes();
+      return this.canWrite() && c.length > 0 && !c.some(s => this.bad(s));
+    },
+
+    // One PUT for every changed setting: api/settings?<name>=<value>&...
+    applySettings() {
+      const changes = this.changes();
+      if (!changes.length) return;
+      const query = changes.map(s =>
+        encodeURIComponent(s.name) + '=' + encodeURIComponent(String(this.form[s.name]).trim()));
+      const q = this.invQ();
+      const url = `${API.settings}?${(q ? [q] : []).concat(query).join('&')}`;
+      this.askPassword({
+        label: 'Settings',
+        text:  `Write ${changes.length} setting${changes.length > 1 ? 's' : ''} to the inverter?`,
+        // No body: the password goes in the Authorization header (UTF-8).
+        send:  password => fetch(url, {
+          method:  'PUT',
+          headers: { Authorization: 'Basic ' + btoa(String.fromCharCode(
+                       ...new TextEncoder().encode(':' + password))) },
+        }),
+      });
     },
 
     infoRows() {
